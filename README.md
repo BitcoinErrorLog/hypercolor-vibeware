@@ -38,6 +38,7 @@ npm start
 | `VIBEWARE_ALLOW_QUERY_TOKEN_LOGIN` | no | Set `true` to honor `?token=` on `GET /`. Default off. Never inferred from `Host` |
 | `VIBEWARE_INSECURE_COOKIE` | no | Set `true` for local http so the dashboard cookie is not `Secure`. Ignored when `NODE_ENV=production` or trusted `X-Forwarded-Proto=https` |
 | `VIBEWARE_TRUST_PROXY` | no | Set `true` to trust `X-Forwarded-Proto` (cookie `Secure`) and `X-Forwarded-For` (login rate limit). Default off |
+| `VIBEWARE_INGEST_ORIGINS` | no | Comma-separated exact origins (`scheme://host[:port]`) allowed to call `POST /v1/evidence` from a browser. Default `https://hypercolor-web.vercel.app`. Boot throws on `*`, empty entries, `null`, paths, query strings, credentials, or non-http(s) values |
 | `PORT` | no | Listen port (default `8080`) |
 
 ## HTTP

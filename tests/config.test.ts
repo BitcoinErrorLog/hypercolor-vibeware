@@ -33,4 +33,37 @@ describe("loadConfig", () => {
       }),
     ).toThrow(/VIBEWARE_DASHBOARD_TOKEN and VIBEWARE_INTERNAL_TOKEN must be distinct/);
   });
+
+  it("defaults ingestOrigins to the Hypercolor web origin when unset", () => {
+    expect(loadConfig(tokens).ingestOrigins).toEqual(["https://hypercolor-web.vercel.app"]);
+  });
+
+  it("parses a trimmed comma-separated exact origin list", () => {
+    expect(
+      loadConfig({
+        ...tokens,
+        VIBEWARE_INGEST_ORIGINS: " https://a.example , http://localhost:3000 ",
+      }).ingestOrigins,
+    ).toEqual(["https://a.example", "http://localhost:3000"]);
+  });
+
+  it("rejects a wildcard VIBEWARE_INGEST_ORIGINS list", () => {
+    expect(() => loadConfig({ ...tokens, VIBEWARE_INGEST_ORIGINS: "*" })).toThrow(/VIBEWARE_INGEST_ORIGINS/);
+  });
+
+  it("rejects a path-like VIBEWARE_INGEST_ORIGINS value", () => {
+    expect(() =>
+      loadConfig({ ...tokens, VIBEWARE_INGEST_ORIGINS: "https://hypercolor-web.vercel.app/ingest" }),
+    ).toThrow(/VIBEWARE_INGEST_ORIGINS/);
+  });
+
+  it("rejects query strings, credentials, and null ingest origins", () => {
+    expect(() =>
+      loadConfig({ ...tokens, VIBEWARE_INGEST_ORIGINS: "https://hypercolor-web.vercel.app?next=1" }),
+    ).toThrow(/VIBEWARE_INGEST_ORIGINS/);
+    expect(() =>
+      loadConfig({ ...tokens, VIBEWARE_INGEST_ORIGINS: "https://user:pass@hypercolor-web.vercel.app" }),
+    ).toThrow(/VIBEWARE_INGEST_ORIGINS/);
+    expect(() => loadConfig({ ...tokens, VIBEWARE_INGEST_ORIGINS: "null" })).toThrow(/VIBEWARE_INGEST_ORIGINS/);
+  });
 });

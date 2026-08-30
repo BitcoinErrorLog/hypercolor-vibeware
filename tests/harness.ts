@@ -14,12 +14,15 @@ export const TEST_DASHBOARD_TOKEN = "test-dashboard-token-32chars";
 export const TEST_INTERNAL_TOKEN = "test-internal-token-32chars-ok";
 export const TEST_COHORT_KEY = "ab".repeat(32);
 
+export const TEST_INGEST_ORIGIN = "https://hypercolor-web.vercel.app";
+
 export const testConfig: Config = {
   port: 0,
   databaseUrl: undefined,
   ingestToken: TEST_INGEST_TOKEN,
   dashboardToken: TEST_DASHBOARD_TOKEN,
   internalToken: TEST_INTERNAL_TOKEN,
+  ingestOrigins: [TEST_INGEST_ORIGIN],
   allowQueryTokenLogin: false,
   insecureCookie: false,
   trustProxy: false,

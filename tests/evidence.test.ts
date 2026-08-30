@@ -12,8 +12,24 @@ import {
   socketEnv,
   TEST_COHORT_KEY,
   TEST_DASHBOARD_TOKEN,
+  TEST_INGEST_ORIGIN,
   testConfig,
 } from "./harness.js";
+
+const UNKNOWN_ORIGIN = "https://evil.example";
+
+function expectNoCors(res: Response) {
+  expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  expect(res.headers.get("access-control-allow-credentials")).toBeNull();
+}
+
+function expectIngestCors(res: Response, origin: string) {
+  expect(res.headers.get("access-control-allow-origin")).toBe(origin);
+  expect(res.headers.get("access-control-allow-methods")).toBe("POST, OPTIONS");
+  expect(res.headers.get("access-control-allow-headers")).toBe("authorization, content-type");
+  expect(res.headers.get("vary")).toBe("Origin");
+  expect(res.headers.get("access-control-allow-credentials")).toBeNull();
+}
 
 type Harness = Awaited<ReturnType<typeof createTestApp>>;
 
@@ -546,5 +562,76 @@ describe("evidence ingest and projection", () => {
     expect(streamed.status).toBe(413);
     expect(streamed.headers.get("set-cookie")).toBeNull();
     expect(await streamed.text()).toContain("Payload too large.");
+  });
+
+  it("allowlisted Origin preflight returns 204 with CORS headers and no credentials", async () => {
+    const { app } = await setup();
+    const res = await app.request("/v1/evidence", {
+      method: "OPTIONS",
+      headers: {
+        origin: TEST_INGEST_ORIGIN,
+        "access-control-request-method": "POST",
+        "access-control-request-headers": "authorization, content-type",
+      },
+    });
+    expect(res.status).toBe(204);
+    expectIngestCors(res, TEST_INGEST_ORIGIN);
+  });
+
+  it("unknown Origin preflight returns success without ACAO", async () => {
+    const { app } = await setup();
+    const res = await app.request("/v1/evidence", {
+      method: "OPTIONS",
+      headers: {
+        origin: UNKNOWN_ORIGIN,
+        "access-control-request-method": "POST",
+        "access-control-request-headers": "authorization, content-type",
+      },
+    });
+    expect([200, 204]).toContain(res.status);
+    expectNoCors(res);
+  });
+
+  it("allowlisted Origin POST with a valid bearer returns 200 and ACAO", async () => {
+    const { app } = await setup();
+    const headers = ingestHeaders();
+    headers.set("origin", TEST_INGEST_ORIGIN);
+    const res = await app.request("/v1/evidence", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(allowlistedEvent({ event_id: "evt_cors_ok" })),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ accepted: true, id: "evt_cors_ok" });
+    expectIngestCors(res, TEST_INGEST_ORIGIN);
+  });
+
+  it("unknown Origin POST with a valid bearer is authorized without ACAO", async () => {
+    const { app } = await setup();
+    const headers = ingestHeaders();
+    headers.set("origin", UNKNOWN_ORIGIN);
+    const res = await app.request("/v1/evidence", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(allowlistedEvent({ event_id: "evt_cors_unknown" })),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ accepted: true, id: "evt_cors_unknown" });
+    expectNoCors(res);
+  });
+
+  it("does not send ACAO on dashboard or projection for an ingest Origin", async () => {
+    const { app } = await setup();
+    const dashboardHeadersWithOrigin = dashboardHeaders();
+    dashboardHeadersWithOrigin.set("origin", TEST_INGEST_ORIGIN);
+    const dashboard = await app.request("/", { headers: dashboardHeadersWithOrigin });
+    expect(dashboard.status).toBe(200);
+    expectNoCors(dashboard);
+
+    const projectionHeadersWithOrigin = dashboardHeaders();
+    projectionHeadersWithOrigin.set("origin", TEST_INGEST_ORIGIN);
+    const projection = await app.request("/v1/projection", { headers: projectionHeadersWithOrigin });
+    expect(projection.status).toBe(200);
+    expectNoCors(projection);
   });
 });

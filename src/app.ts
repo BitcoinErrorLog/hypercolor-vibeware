@@ -82,6 +82,17 @@ function dashboardAuthorized(
   return false;
 }
 
+function applyIngestCors(c: Context, config: Config): void {
+  const origin = c.req.header("origin");
+  if (!origin || !config.ingestOrigins.includes(origin)) {
+    return;
+  }
+  c.res.headers.set("Access-Control-Allow-Origin", origin);
+  c.res.headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+  c.res.headers.set("Access-Control-Allow-Headers", "authorization, content-type");
+  c.res.headers.set("Vary", "Origin");
+}
+
 function attachDashboardCookie(c: Context, config: Config): void {
   setCookie(c, DASHBOARD_COOKIE, config.dashboardToken, {
     httpOnly: true,
@@ -121,6 +132,18 @@ export function createApp(db: Database, config: Config, options: AppOptions = {}
   });
 
   app.get("/health", (c) => c.json({ ok: true }));
+
+  app.use("/v1/evidence", async (c, next) => {
+    if (c.req.method === "OPTIONS") {
+      const response = c.body(null, 204);
+      applyIngestCors(c, config);
+      return response;
+    }
+    await next();
+    if (c.req.method === "POST") {
+      applyIngestCors(c, config);
+    }
+  });
 
   app.post("/v1/evidence", async (c) => {
     if (!bearerMatches(c.req.header("authorization"), config.ingestToken)) {

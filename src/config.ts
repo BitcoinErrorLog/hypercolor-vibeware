@@ -6,11 +6,16 @@ export type Config = {
   ingestToken: string;
   dashboardToken: string;
   internalToken: string;
+  ingestOrigins: string[];
   allowQueryTokenLogin: boolean;
   insecureCookie: boolean;
   trustProxy: boolean;
   nodeEnv: string;
 };
+
+const DEFAULT_INGEST_ORIGINS = ["https://hypercolor-web.vercel.app"];
+const INGEST_ORIGINS_ERROR =
+  "VIBEWARE_INGEST_ORIGINS must be a comma-separated list of exact http(s) origins";
 
 function requiredToken(name: string, env: NodeJS.ProcessEnv): string {
   const value = env[name];
@@ -28,6 +33,45 @@ function requireDistinctTokens(leftName: string, left: string, rightName: string
   if (tokensEqual(left, right)) {
     throw new Error(`${leftName} and ${rightName} must be distinct`);
   }
+}
+
+function isExactHttpOrigin(value: string): boolean {
+  if (value === "" || value === "*" || value === "null") {
+    return false;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return false;
+  }
+  if (parsed.username !== "" || parsed.password !== "") {
+    return false;
+  }
+  if (parsed.hostname === "") {
+    return false;
+  }
+  if (parsed.search !== "" || parsed.hash !== "") {
+    return false;
+  }
+  if (parsed.pathname !== "/") {
+    return false;
+  }
+  return value === parsed.origin;
+}
+
+function parseIngestOrigins(raw: string | undefined): string[] {
+  if (raw === undefined) {
+    return [...DEFAULT_INGEST_ORIGINS];
+  }
+  const parts = raw.split(",").map((part) => part.trim());
+  if (parts.length === 0 || parts.some((part) => !isExactHttpOrigin(part))) {
+    throw new Error(INGEST_ORIGINS_ERROR);
+  }
+  return parts;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -48,6 +92,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ingestToken,
     dashboardToken,
     internalToken,
+    ingestOrigins: parseIngestOrigins(env.VIBEWARE_INGEST_ORIGINS),
     allowQueryTokenLogin: flag(env, "VIBEWARE_ALLOW_QUERY_TOKEN_LOGIN"),
     insecureCookie: flag(env, "VIBEWARE_INSECURE_COOKIE"),
     trustProxy: flag(env, "VIBEWARE_TRUST_PROXY"),
