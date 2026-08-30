@@ -13,7 +13,7 @@ Node 22. Tokens must be at least 16 characters. There are no built-in defaults.
 ```bash
 docker compose up -d
 cp .env.example .env
-# set VIBEWARE_INGEST_TOKEN and VIBEWARE_DASHBOARD_TOKEN
+# set VIBEWARE_INGEST_TOKEN, VIBEWARE_DASHBOARD_TOKEN, and VIBEWARE_INTERNAL_TOKEN
 npm install
 npm run dev
 ```
@@ -33,24 +33,33 @@ npm start
 |---|---|---|
 | `DATABASE_URL` | yes in production | Postgres connection string |
 | `VIBEWARE_INGEST_TOKEN` | yes | Bearer token for `POST /v1/evidence` |
-| `VIBEWARE_DASHBOARD_TOKEN` | yes | Bearer token for projection, dashboard, generate guard, and GC |
+| `VIBEWARE_DASHBOARD_TOKEN` | yes | Read-only bearer/cookie token for projection, dashboard, and `/login` |
+| `VIBEWARE_INTERNAL_TOKEN` | yes | Bearer token for `POST /internal/gc` and `POST /v1/problems/:id/generate` |
+| `VIBEWARE_ALLOW_QUERY_TOKEN_LOGIN` | no | Set `true` to honor `?token=` on `GET /`. Default off. Never inferred from `Host` |
+| `VIBEWARE_INSECURE_COOKIE` | no | Set `true` for local http so the dashboard cookie is not `Secure`. Ignored when `NODE_ENV=production` or trusted `X-Forwarded-Proto=https` |
+| `VIBEWARE_TRUST_PROXY` | no | Set `true` to trust `X-Forwarded-Proto` (cookie `Secure`) and `X-Forwarded-For` (login rate limit). Default off |
 | `PORT` | no | Listen port (default `8080`) |
 
 ## HTTP
 
-- `POST /v1/evidence` — ingest. `Authorization: Bearer $VIBEWARE_INGEST_TOKEN`. Unknown event types return `200 {accepted:false,reason:"unknown_event"}`. Extra keys, banned keys, pubky-shaped values, and recovery-code-shaped values are dropped, not persisted.
+- `POST /v1/evidence` — ingest. `Authorization: Bearer $VIBEWARE_INGEST_TOKEN`. Unknown event types return `200 {accepted:false,reason:"unknown_event"}`. Extra keys, banned keys, values outside the closed payload enums, pubky-shaped values, and recovery-code-shaped values are dropped, not persisted. Route and error fields are closed enums only; free-text values (including `/`, whitespace, `?`, `#`, `=`, `@`) are rejected.
 - `GET /v1/projection` — last 14 days of hourly counts by `event_type` + coarse payload class. `Authorization: Bearer $VIBEWARE_DASHBOARD_TOKEN`. This is the only agent-readable evidence API. `model_allowed = false` rows never appear.
-- `GET /` — HTML dashboard of those same counts. Authorize with `Authorization`, a login form that sets an httpOnly cookie, or `?token=` **only on localhost**.
-- `POST /v1/problems/:id/generate` — `403` unless `problems.state === qualified`. Qualified problems still get `403 generation_disabled` until Phase 2/3 wires a real generator.
-- `POST /internal/gc` — deletes evidence past 14-day retention. The process also runs this on a 15-minute timer.
+- `GET /` — HTML dashboard of those same counts. Authorize with `Authorization` or a login form that sets an httpOnly cookie. `?token=` works only when `VIBEWARE_ALLOW_QUERY_TOKEN_LOGIN=true`. HTML responses send `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'` and `X-Content-Type-Options: nosniff`. Interpolated values are also `escapeHtml`'d.
+- `POST /login` — sets the dashboard cookie. Failed attempts are rate-limited in memory (5 / 15 minutes per remote). The attempted token is not logged.
+- `POST /v1/problems/:id/generate` — `Authorization: Bearer $VIBEWARE_INTERNAL_TOKEN`. `403` unless `problems.state === qualified`. Qualified problems still get `403 generation_disabled` until Phase 2/3 wires a real generator.
+- `POST /internal/gc` — `Authorization: Bearer $VIBEWARE_INTERNAL_TOKEN`. Deletes evidence past 14-day retention. The process also runs this on a 15-minute timer.
 - `GET /health` — liveness.
+
+## Local Docker credentials (waived)
+
+`docker-compose.yml` and `.env.example` use Postgres user/password `vibeware:vibeware` for the local compose database only. That password is local-only and must never be reused on a reachable host. Tests (`npm test`) use PGlite or that local URL; do not generate random compose passwords in a way that breaks `npm test`.
 
 ## Railway
 
-This repo is a web service plus a Postgres plugin. Parent links the project (`railway link`) and sets the two tokens. The plugin injects `DATABASE_URL`. See `railway.toml`.
+This repo is a web service plus a Postgres plugin. Parent links the project (`railway link`) and sets the three tokens. The plugin injects `DATABASE_URL`. See `railway.toml`. Set `VIBEWARE_TRUST_PROXY=true` behind Railway so `Secure` cookies follow `X-Forwarded-Proto`.
 
 Do not put tokens in this repository.
 
 ## Privacy gate
 
-Persisted rows are allowlisted coarse events only, with `model_allowed=true`. Raw evidence expires after 14 days and is deleted. The SQL view `vibeware_evidence_projection` is the only read path used by the dashboard and the projection API.
+Persisted rows are allowlisted coarse events only, with `model_allowed=true`. Every payload field is a closed enum (`PAYLOAD_ENUMS` is exhaustive for `PAYLOAD_FIELDS`). Raw evidence expires after 14 days and is deleted. The SQL view `vibeware_evidence_projection` is the only read path used by the dashboard and the projection API.

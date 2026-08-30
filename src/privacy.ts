@@ -24,7 +24,62 @@ export const PAYLOAD_FIELDS: Record<EventType, readonly string[]> = {
   "app.pwa.installed": ["outcome"],
 };
 
-const PAYLOAD_ENUMS: Partial<Record<EventType, Record<string, readonly string[]>>> = {
+export const ROUTE_VALUES = [
+  "welcome",
+  "enable",
+  "chats",
+  "chat",
+  "channels",
+  "channel",
+  "contacts",
+  "contact",
+  "requests",
+  "profile",
+  "settings",
+  "ring-callback",
+] as const;
+
+export const FROM_ROUTE_VALUES = [...ROUTE_VALUES, "none"] as const;
+
+export const ERROR_CODES = [
+  "network",
+  "auth",
+  "protocol",
+  "consumed",
+  "validation",
+  "unavailable",
+  "too-large",
+  "not-found",
+  "unsupported-target",
+  "decrypt-failed",
+] as const;
+
+export const ERROR_SURFACES = [
+  "hc-chats-ui",
+  "hc-thread-ui",
+  "hc-onboarding-ui",
+  "chats",
+  "thread",
+  "onboarding",
+  "settings",
+  "requests",
+  "pwa",
+  "groups",
+  "contacts",
+  "ring-callback",
+] as const;
+
+export type PayloadEnums = {
+  [K in EventType]: {
+    [F in (typeof PAYLOAD_FIELDS)[K][number]]: readonly string[];
+  };
+};
+
+export const PAYLOAD_ENUMS = {
+  "app.route.viewed": {
+    route: ROUTE_VALUES,
+    from_route: FROM_ROUTE_VALUES,
+  },
   "app.onboarding.state": {
     state: ["no-identity", "needs-enable", "session-offline", "live"],
   },
@@ -40,8 +95,14 @@ const PAYLOAD_ENUMS: Partial<Record<EventType, Record<string, readonly string[]>
     decision: ["accept", "decline"],
   },
   "app.backup.export_outcome": { outcome: ["shown", "confirmed", "cancelled"] },
+  "app.error.coarse": {
+    code: ERROR_CODES,
+    surface: ERROR_SURFACES,
+  },
   "app.pwa.installed": { outcome: ["accepted", "dismissed"] },
-};
+} as const satisfies PayloadEnums;
+
+const FORBIDDEN_VALUE_CHARS = /[\s/?#=@]/;
 
 export const MAX_PAYLOAD_BYTES = 256;
 export const MAX_COARSE_STRING = 64;
@@ -152,7 +213,7 @@ export function evaluateEvidence(body: unknown, idFactory: () => string): Eviden
   }
 
   const clean: Record<string, string> = {};
-  const enums = PAYLOAD_ENUMS[eventType];
+  const enums = PAYLOAD_ENUMS[eventType] as Record<string, readonly string[]>;
   for (const key of allowed) {
     const value = payload[key];
     if (typeof value !== "string") {
@@ -161,11 +222,15 @@ export function evaluateEvidence(body: unknown, idFactory: () => string): Eviden
     if (value.length > MAX_COARSE_STRING) {
       return { accepted: false, reason: "invalid_payload" };
     }
-    if (enums?.[key] && !enums[key].includes(value)) {
+    if (FORBIDDEN_VALUE_CHARS.test(value)) {
       return { accepted: false, reason: "invalid_payload" };
     }
     const shaped = secretShapeReason(value);
     if (shaped) return { accepted: false, reason: shaped };
+    const allowedValues = enums[key];
+    if (!allowedValues || !allowedValues.includes(value)) {
+      return { accepted: false, reason: "invalid_payload" };
+    }
     clean[key] = value;
   }
 

@@ -7,7 +7,10 @@ import {
   createTestApp,
   dashboardHeaders,
   ingestHeaders,
+  internalHeaders,
   TEST_COHORT_KEY,
+  TEST_DASHBOARD_TOKEN,
+  testConfig,
 } from "./harness.js";
 
 type Harness = Awaited<ReturnType<typeof createTestApp>>;
@@ -162,7 +165,7 @@ describe("evidence ingest and projection", () => {
     );
     const res = await app.request("/v1/problems/prob_unqualified/generate", {
       method: "POST",
-      headers: dashboardHeaders(),
+      headers: internalHeaders(),
     });
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ reason: "unqualified" });
@@ -233,5 +236,147 @@ describe("evidence ingest and projection", () => {
     expect(html).not.toContain("SELECT");
     expect(html).not.toContain("secret message");
     expect(html).toContain("No raw");
+    expect(page.headers.get("content-security-policy")).toBe(
+      "default-src 'none'; style-src 'unsafe-inline'",
+    );
+    expect(page.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
+  it("rejects hostile free-text route values and does not persist them", async () => {
+    const { app, db } = await setup();
+    const res = await app.request("/v1/evidence", {
+      method: "POST",
+      headers: ingestHeaders(),
+      body: JSON.stringify(
+        allowlistedEvent({
+          event_type: "app.route.viewed",
+          payload: { route: "secret message", from_route: "none" },
+        }),
+      ),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ accepted: false, reason: "invalid_payload" });
+
+    const stored = JSON.stringify(await dumpEvidence(db));
+    expect(stored).not.toContain("secret message");
+    expect(await dumpEvidence(db)).toEqual([]);
+
+    const projection = await app.request("/v1/projection", { headers: dashboardHeaders() });
+    const body = await projection.text();
+    expect(body).not.toContain("secret message");
+    const parsed = JSON.parse(body) as { rows: unknown[] };
+    expect(parsed.rows).toEqual([]);
+  });
+
+  it("accepts a closed-enum route event", async () => {
+    const { app, db } = await setup();
+    const res = await app.request("/v1/evidence", {
+      method: "POST",
+      headers: ingestHeaders(),
+      body: JSON.stringify(
+        allowlistedEvent({
+          event_id: "evt_route_ok",
+          event_type: "app.route.viewed",
+          payload: { route: "chats", from_route: "none" },
+        }),
+      ),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ accepted: true, id: "evt_route_ok" });
+    expect(await dumpEvidence(db)).toHaveLength(1);
+  });
+
+  it("splits dashboard read token from internal mutate token", async () => {
+    const { app, db } = await setup();
+    await db.query(
+      `INSERT INTO problems (id, surface_id, title, summary, state)
+       VALUES ('prob_split', 'hc-chats-ui', 'empty dms', 'empty state persists', 'detected')`,
+    );
+
+    const dashboardGc = await app.request("/internal/gc", {
+      method: "POST",
+      headers: dashboardHeaders(),
+    });
+    expect(dashboardGc.status).toBe(401);
+
+    const dashboardGenerate = await app.request("/v1/problems/prob_split/generate", {
+      method: "POST",
+      headers: dashboardHeaders(),
+    });
+    expect(dashboardGenerate.status).toBe(401);
+
+    const ingestGc = await app.request("/internal/gc", {
+      method: "POST",
+      headers: ingestHeaders(),
+    });
+    expect(ingestGc.status).toBe(401);
+
+    const internalProjection = await app.request("/v1/projection", { headers: internalHeaders() });
+    expect(internalProjection.status).toBe(401);
+
+    const internalGc = await app.request("/internal/gc", {
+      method: "POST",
+      headers: internalHeaders(),
+    });
+    expect(internalGc.status).toBe(200);
+    expect(await internalGc.json()).toEqual({ deleted: 0 });
+
+    const internalGenerate = await app.request("/v1/problems/prob_split/generate", {
+      method: "POST",
+      headers: internalHeaders(),
+    });
+    expect(internalGenerate.status).toBe(403);
+    expect(await internalGenerate.json()).toEqual({ reason: "unqualified" });
+
+    const projection = await app.request("/v1/projection", { headers: dashboardHeaders() });
+    expect(projection.status).toBe(200);
+  });
+
+  it("does not honor query-token login from Host localhost", async () => {
+    const { app } = await setup();
+    const res = await app.request(`/?token=${encodeURIComponent(TEST_DASHBOARD_TOKEN)}`, {
+      headers: { host: "localhost:8080" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("set-cookie")).toBeNull();
+    const html = await res.text();
+    expect(html).toContain("Dashboard token");
+    expect(html).not.toContain("Hourly projection");
+  });
+
+  it("honors query-token login only when explicitly enabled", async () => {
+    harness = await createTestApp({ ...testConfig, allowQueryTokenLogin: true });
+    const { app } = harness;
+    const res = await app.request(`/?token=${encodeURIComponent(TEST_DASHBOARD_TOKEN)}`);
+    expect(res.status).toBe(302);
+    expect(res.headers.get("set-cookie") ?? "").toMatch(/HttpOnly/i);
+  });
+
+  it("rate-limits failed dashboard logins without echoing the token", async () => {
+    const { app } = await setup();
+    const headers = { "content-type": "application/x-www-form-urlencoded" };
+    for (let i = 0; i < 5; i += 1) {
+      const failed = await app.request("/login", {
+        method: "POST",
+        headers,
+        body: "token=wrong-guess-not-the-dashboard-token",
+      });
+      expect(failed.status).toBe(401);
+      const text = await failed.text();
+      expect(text).not.toContain("wrong-guess-not-the-dashboard-token");
+    }
+    const limited = await app.request("/login", {
+      method: "POST",
+      headers,
+      body: `token=${encodeURIComponent(TEST_DASHBOARD_TOKEN)}`,
+    });
+    expect(limited.status).toBe(429);
+    const limitedText = await limited.text();
+    expect(limitedText).toContain("Too many attempts.");
+    expect(limitedText).not.toContain(TEST_DASHBOARD_TOKEN);
+    expect(limited.headers.get("content-security-policy")).toBe(
+      "default-src 'none'; style-src 'unsafe-inline'",
+    );
+    expect(limited.headers.get("x-content-type-options")).toBe("nosniff");
   });
 });

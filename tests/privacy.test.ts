@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evaluateEvidence } from "../src/privacy.js";
+import { EVENT_TYPES, evaluateEvidence, PAYLOAD_ENUMS, PAYLOAD_FIELDS } from "../src/privacy.js";
 import { allowlistedEvent, TEST_COHORT_KEY } from "./harness.js";
 
 const id = () => "evt_test";
@@ -49,5 +49,26 @@ describe("evaluateEvidence", () => {
     delete (event as { cohort_key?: string }).cohort_key;
     const decision = evaluateEvidence({ ...event, actor: { cohort_key: TEST_COHORT_KEY } }, id);
     expect(decision.accepted).toBe(true);
+  });
+
+  it("rejects free-text route values", () => {
+    const decision = evaluateEvidence(
+      allowlistedEvent({
+        event_type: "app.route.viewed",
+        payload: { route: "secret message", from_route: "none" },
+      }),
+      id,
+    );
+    expect(decision).toEqual({ accepted: false, reason: "invalid_payload" });
+  });
+
+  it("PAYLOAD_ENUMS is exhaustive for every PAYLOAD_FIELDS key", () => {
+    for (const type of EVENT_TYPES) {
+      for (const field of PAYLOAD_FIELDS[type]) {
+        const values = (PAYLOAD_ENUMS[type] as Record<string, readonly string[]>)[field];
+        expect(values, `${type}.${field}`).toBeDefined();
+        expect(values.length, `${type}.${field}`).toBeGreaterThan(0);
+      }
+    }
   });
 });

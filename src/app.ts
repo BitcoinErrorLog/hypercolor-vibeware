@@ -7,24 +7,36 @@ import { renderDashboardPage, renderLoginPage } from "./dashboard.js";
 import { gcExpiredEvidence } from "./gc.js";
 import { evaluateEvidence } from "./privacy.js";
 import { readProjection, serializeProjection } from "./projection.js";
+import { createFailureLimiter } from "./rateLimit.js";
 import { bearerMatches, tokensEqual } from "./tokens.js";
 
 const MAX_BODY_BYTES = 8192;
 const DASHBOARD_COOKIE = "vw_dashboard";
+const LOGIN_FAILURE_MAX = 5;
+const LOGIN_FAILURE_WINDOW_MS = 15 * 60 * 1000;
+const HTML_CSP = "default-src 'none'; style-src 'unsafe-inline'";
 
-function hostnameOf(hostHeader: string): string {
-  const host = hostHeader.trim().toLowerCase();
-  if (host.startsWith("[")) {
-    const end = host.indexOf("]");
-    return end === -1 ? host : host.slice(1, end);
-  }
-  return host.split(":")[0] ?? "";
+function forwardedProto(c: Context, config: Config): string | undefined {
+  if (!config.trustProxy) return undefined;
+  const raw = c.req.header("x-forwarded-proto");
+  if (!raw) return undefined;
+  return raw.split(",")[0]?.trim().toLowerCase();
 }
 
-function isLocalhostHost(hostHeader: string | undefined): boolean {
-  if (!hostHeader) return false;
-  const name = hostnameOf(hostHeader);
-  return name === "localhost" || name === "127.0.0.1" || name === "::1";
+function cookieSecure(c: Context, config: Config): boolean {
+  if (config.nodeEnv === "production") return true;
+  if (forwardedProto(c, config) === "https") return true;
+  if (config.insecureCookie) return false;
+  return true;
+}
+
+function loginClientKey(c: Context, config: Config): string {
+  if (config.trustProxy) {
+    const xff = c.req.header("x-forwarded-for");
+    const first = xff?.split(",")[0]?.trim();
+    if (first) return first;
+  }
+  return "direct";
 }
 
 function dashboardAuthorized(
@@ -37,19 +49,30 @@ function dashboardAuthorized(
   return false;
 }
 
-function attachDashboardCookie(c: Context, token: string): void {
-  const local = isLocalhostHost(c.req.header("host"));
-  setCookie(c, DASHBOARD_COOKIE, token, {
+function attachDashboardCookie(c: Context, config: Config): void {
+  setCookie(c, DASHBOARD_COOKIE, config.dashboardToken, {
     httpOnly: true,
     sameSite: "Lax",
     path: "/",
-    secure: !local,
+    secure: cookieSecure(c, config),
     maxAge: 60 * 60 * 12,
   });
 }
 
 export function createApp(db: Database, config: Config) {
   const app = new Hono();
+  const loginFailures = createFailureLimiter({
+    max: LOGIN_FAILURE_MAX,
+    windowMs: LOGIN_FAILURE_WINDOW_MS,
+  });
+
+  app.use("*", async (c, next) => {
+    await next();
+    if ((c.res.headers.get("content-type") ?? "").includes("text/html")) {
+      c.res.headers.set("Content-Security-Policy", HTML_CSP);
+      c.res.headers.set("X-Content-Type-Options", "nosniff");
+    }
+  });
 
   app.get("/health", (c) => c.json({ ok: true }));
 
@@ -101,7 +124,7 @@ export function createApp(db: Database, config: Config) {
   });
 
   app.post("/v1/problems/:id/generate", async (c) => {
-    if (!bearerMatches(c.req.header("authorization"), config.dashboardToken)) {
+    if (!bearerMatches(c.req.header("authorization"), config.internalToken)) {
       return c.json({ reason: "unauthorized" }, 401);
     }
     const id = c.req.param("id");
@@ -120,7 +143,7 @@ export function createApp(db: Database, config: Config) {
   });
 
   app.post("/internal/gc", async (c) => {
-    if (!bearerMatches(c.req.header("authorization"), config.dashboardToken)) {
+    if (!bearerMatches(c.req.header("authorization"), config.internalToken)) {
       return c.json({ reason: "unauthorized" }, 401);
     }
     const deleted = await gcExpiredEvidence(db);
@@ -128,26 +151,31 @@ export function createApp(db: Database, config: Config) {
   });
 
   app.post("/login", async (c) => {
+    const key = loginClientKey(c, config);
+    if (loginFailures.isLimited(key)) {
+      return c.html(renderLoginPage("Too many attempts."), 429);
+    }
     const form = await c.req.parseBody();
     const token = typeof form.token === "string" ? form.token : "";
     if (!tokensEqual(token, config.dashboardToken)) {
+      loginFailures.recordFailure(key);
       return c.html(renderLoginPage("Invalid token."), 401);
     }
-    attachDashboardCookie(c, config.dashboardToken);
+    loginFailures.clear(key);
+    attachDashboardCookie(c, config);
     return c.redirect("/", 302);
   });
 
   app.get("/", async (c) => {
-    const host = c.req.header("host");
     const queryToken = c.req.query("token");
     if (queryToken !== undefined) {
-      if (!isLocalhostHost(host)) {
+      if (!config.allowQueryTokenLogin) {
         return c.html(renderLoginPage(), 200);
       }
       if (!tokensEqual(queryToken, config.dashboardToken)) {
         return c.html(renderLoginPage("Invalid token."), 401);
       }
-      attachDashboardCookie(c, config.dashboardToken);
+      attachDashboardCookie(c, config);
       return c.redirect("/", 302);
     }
     if (!dashboardAuthorized(c.req.header("authorization"), getCookie(c, DASHBOARD_COOKIE), config.dashboardToken)) {

@@ -11,6 +11,7 @@ import { seedSurfaces } from "../src/seed.js";
 
 export const TEST_INGEST_TOKEN = "test-ingest-token-32chars-min";
 export const TEST_DASHBOARD_TOKEN = "test-dashboard-token-32chars";
+export const TEST_INTERNAL_TOKEN = "test-internal-token-32chars-ok";
 export const TEST_COHORT_KEY = "ab".repeat(32);
 
 export const testConfig: Config = {
@@ -18,14 +19,19 @@ export const testConfig: Config = {
   databaseUrl: undefined,
   ingestToken: TEST_INGEST_TOKEN,
   dashboardToken: TEST_DASHBOARD_TOKEN,
+  internalToken: TEST_INTERNAL_TOKEN,
+  allowQueryTokenLogin: false,
+  insecureCookie: false,
+  trustProxy: false,
+  nodeEnv: "test",
 };
 
-export async function createTestApp() {
+export async function createTestApp(config: Config = testConfig) {
   const db = await openDatabase(testDatabaseUrl());
   await resetSchema(db);
   await migrate(db);
   await seedSurfaces(db);
-  const app = createApp(db, testConfig);
+  const app = createApp(db, config);
   return { app, db };
 }
 
@@ -43,6 +49,12 @@ export function ingestHeaders(): Headers {
 export function dashboardHeaders(): Headers {
   const headers = new Headers();
   headers.set("authorization", `Bearer ${TEST_DASHBOARD_TOKEN}`);
+  return headers;
+}
+
+export function internalHeaders(): Headers {
+  const headers = new Headers();
+  headers.set("authorization", `Bearer ${TEST_INTERNAL_TOKEN}`);
   return headers;
 }
 
