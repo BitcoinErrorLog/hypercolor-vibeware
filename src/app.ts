@@ -6,11 +6,18 @@ import { MAX_BODY_BYTES, readTextLimited } from "./body.js";
 import type { Config } from "./config.js";
 import type { Database } from "./db.js";
 import { renderDashboardPage, renderLoginPage } from "./dashboard.js";
+import type { DetectorHit } from "./detectors.js";
 import { gcExpiredEvidence } from "./gc.js";
+import { detectProblems, generateCandidate, listProblems, publicProblem, qualifyProblem } from "./problems.js";
 import { evaluateEvidence } from "./privacy.js";
 import { readProjection, serializeProjection } from "./projection.js";
 import { createFailureLimiter } from "./rateLimit.js";
 import { bearerMatches, tokensEqual } from "./tokens.js";
+
+export type AppOptions = {
+  now?: () => Date;
+  extraDetectors?: () => DetectorHit[];
+};
 
 const DASHBOARD_COOKIE = "vw_dashboard";
 const LOGIN_FAILURE_MAX = 5;
@@ -85,8 +92,21 @@ function attachDashboardCookie(c: Context, config: Config): void {
   });
 }
 
-export function createApp(db: Database, config: Config) {
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseQualifyBody(value: unknown): { qualified: boolean; actor: string; reason: string } | null {
+  if (!isPlainObject(value)) return null;
+  if (typeof value.qualified !== "boolean") return null;
+  if (typeof value.actor !== "string" || value.actor.trim().length === 0) return null;
+  if (typeof value.reason !== "string" || value.reason.trim().length === 0) return null;
+  return { qualified: value.qualified, actor: value.actor.trim(), reason: value.reason.trim() };
+}
+
+export function createApp(db: Database, config: Config, options: AppOptions = {}) {
   const app = new Hono();
+  const clock = options.now ?? (() => new Date());
   const loginFailures = createFailureLimiter({
     max: LOGIN_FAILURE_MAX,
     windowMs: LOGIN_FAILURE_WINDOW_MS,
@@ -116,7 +136,7 @@ export function createApp(db: Database, config: Config) {
     } catch {
       return c.json({ accepted: false, reason: "invalid_json" }, 400);
     }
-    const decision = evaluateEvidence(body, () => `evt_${randomUUID()}`);
+    const decision = evaluateEvidence(body, () => `evt_${randomUUID()}`, () => clock().getTime());
     if (!decision.accepted) {
       return c.json({ accepted: false, reason: decision.reason }, 200);
     }
@@ -157,27 +177,59 @@ export function createApp(db: Database, config: Config) {
     if (!bearerMatches(c.req.header("authorization"), config.dashboardToken)) {
       return c.json({ accepted: false, reason: "unauthorized" }, 401);
     }
-    const rows = serializeProjection(await readProjection(db));
+    const rows = serializeProjection(await readProjection(db, clock()));
     return c.json({ window_days: 14, rows });
+  });
+
+  app.post("/v1/problems/detect", async (c) => {
+    if (!bearerMatches(c.req.header("authorization"), config.internalToken)) {
+      return c.json({ reason: "unauthorized" }, 401);
+    }
+    const extra = options.extraDetectors?.() ?? [];
+    const problems = await detectProblems(db, clock(), extra);
+    return c.json({ problems: problems.map(publicProblem) }, 200);
+  });
+
+  app.post("/v1/problems/:id/qualify", async (c) => {
+    if (!bearerMatches(c.req.header("authorization"), config.internalToken)) {
+      return c.json({ reason: "unauthorized" }, 401);
+    }
+    const limited = await readTextLimited(c.req.raw, MAX_BODY_BYTES);
+    if (!limited.ok) {
+      return c.json({ reason: "payload_too_large" }, 400);
+    }
+    let body: unknown;
+    try {
+      body = JSON.parse(limited.text) as unknown;
+    } catch {
+      return c.json({ reason: "invalid_json" }, 400);
+    }
+    const parsed = parseQualifyBody(body);
+    if (!parsed) {
+      return c.json({ reason: "invalid_body" }, 400);
+    }
+    const result = await qualifyProblem(db, {
+      id: c.req.param("id"),
+      qualified: parsed.qualified,
+      actor: parsed.actor,
+      reason: parsed.reason,
+      now: clock(),
+    });
+    if (!result.ok) {
+      return c.json({ reason: result.reason }, result.status);
+    }
+    return c.json(publicProblem(result.problem), 200);
   });
 
   app.post("/v1/problems/:id/generate", async (c) => {
     if (!bearerMatches(c.req.header("authorization"), config.internalToken)) {
       return c.json({ reason: "unauthorized" }, 401);
     }
-    const id = c.req.param("id");
-    const problems = await db.query<{ id: string; state: string }>(
-      `SELECT id, state FROM problems WHERE id = $1`,
-      [id],
-    );
-    const problem = problems[0];
-    if (!problem) {
-      return c.json({ reason: "not_found" }, 404);
+    const result = await generateCandidate(db, c.req.param("id"));
+    if (!result.ok) {
+      return c.json({ reason: result.reason }, result.status);
     }
-    if (problem.state !== "qualified") {
-      return c.json({ reason: "unqualified" }, 403);
-    }
-    return c.json({ reason: "generation_disabled" }, 403);
+    return c.json(result.candidate, result.created ? 201 : 200);
   });
 
   app.post("/internal/gc", async (c) => {
@@ -222,8 +274,10 @@ export function createApp(db: Database, config: Config) {
     if (!dashboardAuthorized(c.req.header("authorization"), getCookie(c, DASHBOARD_COOKIE), config.dashboardToken)) {
       return c.html(renderLoginPage(), 200);
     }
-    const rows = await readProjection(db);
-    return c.html(renderDashboardPage(rows), 200);
+    const now = clock();
+    const rows = await readProjection(db, now);
+    const problems = await listProblems(db);
+    return c.html(renderDashboardPage(rows, problems), 200);
   });
 
   return app;

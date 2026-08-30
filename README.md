@@ -34,7 +34,7 @@ npm start
 | `DATABASE_URL` | yes in production | Postgres connection string |
 | `VIBEWARE_INGEST_TOKEN` | yes | Bearer token for `POST /v1/evidence` |
 | `VIBEWARE_DASHBOARD_TOKEN` | yes | Read-only bearer/cookie token for projection, dashboard, and `/login` |
-| `VIBEWARE_INTERNAL_TOKEN` | yes | Bearer token for `POST /internal/gc` and `POST /v1/problems/:id/generate` |
+| `VIBEWARE_INTERNAL_TOKEN` | yes | Bearer token for detect, qualify, generate, and `POST /internal/gc` |
 | `VIBEWARE_ALLOW_QUERY_TOKEN_LOGIN` | no | Set `true` to honor `?token=` on `GET /`. Default off. Never inferred from `Host` |
 | `VIBEWARE_INSECURE_COOKIE` | no | Set `true` for local http so the dashboard cookie is not `Secure`. Ignored when `NODE_ENV=production` or trusted `X-Forwarded-Proto=https` |
 | `VIBEWARE_TRUST_PROXY` | no | Set `true` to trust `X-Forwarded-Proto` (cookie `Secure`) and `X-Forwarded-For` (login rate limit). Default off |
@@ -46,7 +46,10 @@ npm start
 - `GET /v1/projection` — last 14 days of hourly counts by `event_type` + coarse payload class. `Authorization: Bearer $VIBEWARE_DASHBOARD_TOKEN`. This is the only agent-readable evidence API. `model_allowed = false` rows never appear.
 - `GET /` — HTML dashboard of those same counts. Authorize with `Authorization` or a login form that sets an httpOnly cookie. `?token=` works only when `VIBEWARE_ALLOW_QUERY_TOKEN_LOGIN=true`. HTML responses send `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'` and `X-Content-Type-Options: nosniff`. Interpolated values are also `escapeHtml`'d.
 - `POST /login` — sets the dashboard cookie. Failed attempts are rate-limited in memory (5 / 15 minutes per remote). The attempted token is not logged.
-- `POST /v1/problems/:id/generate` — `Authorization: Bearer $VIBEWARE_INTERNAL_TOKEN`. `403` unless `problems.state === qualified`. Qualified problems still get `403 generation_disabled` until Phase 2/3 wires a real generator.
+- `POST /v1/problems/detect` — `Authorization: Bearer $VIBEWARE_INTERNAL_TOKEN`. Runs rule-based detectors on the hourly projection (never raw `evidence` rows), clusters hits into `problems`, writes `qualification` gates, and records `state_transitions`. Forbidden `suspected_scope` auto-rejects (`validation_failed`).
+- `POST /v1/problems/:id/qualify` — internal token. Human only. Body `{qualified, actor, reason}`. Sets `qualified` or `rejected`. Cannot qualify a forbidden-scope rejection.
+- `POST /v1/problems/:id/generate` — internal token. `403 unqualified` unless `problems.state === qualified`. If qualified, persists a `candidates` row in `request_ready` with a `candidate_request` artifact (`surface`, evidence IDs only, path lists, budgets). No LLM. No PR.
+- Dashboard `GET /` also lists problems (`id`, surface, state, title). No raw evidence.
 - `POST /internal/gc` — `Authorization: Bearer $VIBEWARE_INTERNAL_TOKEN`. Deletes evidence past 14-day retention. The process also runs this on a 15-minute timer.
 - `GET /health` — liveness.
 

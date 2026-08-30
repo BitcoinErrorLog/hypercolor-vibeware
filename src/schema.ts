@@ -1,3 +1,16 @@
+export const PROJECTION_PAYLOAD_CLASS_SQL = `CASE type
+    WHEN 'app.route.viewed' THEN concat_ws('|', payload->>'route', payload->>'from_route')
+    WHEN 'app.onboarding.state' THEN coalesce(payload->>'state', '')
+    WHEN 'app.onboarding.abandoned' THEN coalesce(payload->>'step', '')
+    WHEN 'app.chat.empty_state' THEN coalesce(payload->>'kind', '')
+    WHEN 'app.thread.send_settled' THEN concat_ws('|', payload->>'channel', payload->>'outcome', payload->>'kind')
+    WHEN 'app.request.decision' THEN concat_ws('|', payload->>'kind', payload->>'decision')
+    WHEN 'app.backup.export_outcome' THEN coalesce(payload->>'outcome', '')
+    WHEN 'app.error.coarse' THEN concat_ws('|', payload->>'code', payload->>'surface')
+    WHEN 'app.pwa.installed' THEN coalesce(payload->>'outcome', '')
+    ELSE NULL
+  END`;
+
 export const SCHEMA_STATEMENTS: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS vibeware_surfaces (
   id text primary key,
@@ -17,12 +30,17 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS problems (
   id text primary key,
   surface_id text not null,
+  detector_key text,
   title text not null,
   summary text not null,
+  suspected_scope jsonb not null default '[]'::jsonb,
   qualification jsonb,
   state text not null,
   created_at timestamptz not null default now()
 )`,
+  `ALTER TABLE problems ADD COLUMN IF NOT EXISTS detector_key text`,
+  `ALTER TABLE problems ADD COLUMN IF NOT EXISTS suspected_scope jsonb not null default '[]'::jsonb`,
+  `CREATE INDEX IF NOT EXISTS problems_detector_idx ON problems (surface_id, detector_key)`,
   `CREATE TABLE IF NOT EXISTS candidates (
   id text primary key,
   problem_id text not null,
@@ -72,18 +90,7 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
 SELECT
   date_trunc('hour', occurred_at) AS hour,
   type AS event_type,
-  CASE type
-    WHEN 'app.route.viewed' THEN concat_ws('|', payload->>'route', payload->>'from_route')
-    WHEN 'app.onboarding.state' THEN coalesce(payload->>'state', '')
-    WHEN 'app.onboarding.abandoned' THEN coalesce(payload->>'step', '')
-    WHEN 'app.chat.empty_state' THEN coalesce(payload->>'kind', '')
-    WHEN 'app.thread.send_settled' THEN concat_ws('|', payload->>'channel', payload->>'outcome', payload->>'kind')
-    WHEN 'app.request.decision' THEN concat_ws('|', payload->>'kind', payload->>'decision')
-    WHEN 'app.backup.export_outcome' THEN coalesce(payload->>'outcome', '')
-    WHEN 'app.error.coarse' THEN concat_ws('|', payload->>'code', payload->>'surface')
-    WHEN 'app.pwa.installed' THEN coalesce(payload->>'outcome', '')
-    ELSE NULL
-  END AS payload_class,
+  ${PROJECTION_PAYLOAD_CLASS_SQL} AS payload_class,
   count(*)::bigint AS event_count
 FROM evidence
 WHERE model_allowed = true

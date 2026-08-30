@@ -1,4 +1,5 @@
 import { EVENT_TYPES } from "./privacy.js";
+import type { ProblemRow } from "./problems.js";
 import { serializeProjection, type ProjectionRow } from "./projection.js";
 
 function escapeHtml(value: string): string {
@@ -45,8 +46,17 @@ export function renderLoginPage(error?: string): string {
 </html>`;
 }
 
-export function renderDashboardPage(rows: ProjectionRow[]): string {
+export function renderDashboardPage(rows: ProjectionRow[], problems: ProblemRow[] = []): string {
   const serialized = serializeProjection(rows);
+  const problemRows =
+    problems.length === 0
+      ? `<tr><td colspan="4">No problems.</td></tr>`
+      : problems
+          .map(
+            (problem) =>
+              `<tr><td>${escapeHtml(problem.id)}</td><td>${escapeHtml(problem.surface_id)}</td><td>${escapeHtml(problem.state)}</td><td>${escapeHtml(problem.title)}</td></tr>`,
+          )
+          .join("");
   const totals = new Map<string, number>(EVENT_TYPES.map((type) => [type, 0]));
   for (const row of serialized) {
     totals.set(row.event_type, (totals.get(row.event_type) ?? 0) + row.event_count);
@@ -88,6 +98,11 @@ export function renderDashboardPage(rows: ProjectionRow[]): string {
   <main>
     <h1>Vibeware evidence dashboard</h1>
     <p>Last 14 days. Hourly counts by event type and coarse payload class. This is not the Hypercolor app. No user content. No agent. No raw <code>evidence</code> rows.</p>
+    <h2>Problems</h2>
+    <table>
+      <thead><tr><th>Id</th><th>Surface</th><th>State</th><th>Title</th></tr></thead>
+      <tbody>${problemRows}</tbody>
+    </table>
     <h2>Nine-event totals</h2>
     <table>
       <thead><tr><th>Event</th><th>Count</th></tr></thead>

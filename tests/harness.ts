@@ -1,4 +1,4 @@
-import { createApp } from "../src/app.js";
+import { createApp, type AppOptions } from "../src/app.js";
 import type { Config } from "../src/config.js";
 import {
   migrate,
@@ -26,12 +26,12 @@ export const testConfig: Config = {
   nodeEnv: "test",
 };
 
-export async function createTestApp(config: Config = testConfig) {
+export async function createTestApp(config: Config = testConfig, options: AppOptions = {}) {
   const db = await openDatabase(testDatabaseUrl());
   await resetSchema(db);
   await migrate(db);
   await seedSurfaces(db);
-  const app = createApp(db, config);
+  const app = createApp(db, config, options);
   return { app, db };
 }
 

@@ -181,7 +181,11 @@ function extractCohortKey(body: Record<string, unknown>): string | null {
   return null;
 }
 
-export function evaluateEvidence(body: unknown, idFactory: () => string): EvidenceDecision {
+export function evaluateEvidence(
+  body: unknown,
+  idFactory: () => string,
+  nowMs: () => number = Date.now,
+): EvidenceDecision {
   if (!isPlainObject(body)) {
     return { accepted: false, reason: "invalid_json" };
   }
@@ -277,7 +281,7 @@ export function evaluateEvidence(body: unknown, idFactory: () => string): Eviden
   if (Number.isNaN(occurredAt.getTime())) {
     return { accepted: false, reason: "invalid_occurred_at" };
   }
-  const now = Date.now();
+  const now = nowMs();
   if (occurredAt.getTime() > now + 5 * 60 * 1000) {
     return { accepted: false, reason: "invalid_occurred_at" };
   }
