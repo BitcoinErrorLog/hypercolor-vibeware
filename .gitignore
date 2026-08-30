@@ -1,0 +1,10 @@
+node_modules
+dist
+.env
+.env.*
+!.env.example
+._*
+.DS_Store
+coverage
+*.log
+.pglite
