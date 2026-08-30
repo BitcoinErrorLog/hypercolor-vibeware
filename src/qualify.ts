@@ -9,7 +9,8 @@ export type ProblemState = (typeof PROBLEM_STATES)[number];
 
 export type QualificationGates = {
   repeated: boolean;
-  multi_user: boolean;
+  /** Event-count volume (`sampleSize >= 3`), not distinct users. */
+  min_volume: boolean;
   known_incident: boolean;
   measurement_changed: boolean;
   within_surface_scope: boolean;
@@ -20,6 +21,7 @@ export type QualificationGates = {
 
 export type Qualification = {
   gates: QualificationGates;
+  /** Advisory only. `decideState` ignores this and uses the forbidden-boundary gate. */
   qualification_score: number;
   decision: "rejected" | "pending_qualify" | "qualified";
   reject_reason?: "validation_failed";
@@ -35,14 +37,12 @@ export type Qualification = {
 export function qualificationScore(gates: QualificationGates): number {
   let n = 0;
   if (gates.repeated) n += 1;
-  if (gates.multi_user) n += 1;
-  if (!gates.known_incident) n += 1;
-  if (!gates.measurement_changed) n += 1;
+  if (gates.min_volume) n += 1;
   if (gates.within_surface_scope) n += 1;
   if (!gates.touches_forbidden_boundary) n += 1;
   if (gates.enough_evidence) n += 1;
   if (gates.roadmap_relevant) n += 1;
-  return n / 8;
+  return n / 6;
 }
 
 export function evaluateGates(input: {
@@ -58,7 +58,7 @@ export function evaluateGates(input: {
   const withinWritable = scopeWithinWritable(input.suspectedScope, input.surface.writable_paths);
   return {
     repeated: input.bucketCount >= 2 || input.sampleSize >= 2,
-    multi_user: input.sampleSize >= 3,
+    min_volume: input.sampleSize >= 3,
     known_incident: false,
     measurement_changed: false,
     within_surface_scope: withinWritable && !touches,

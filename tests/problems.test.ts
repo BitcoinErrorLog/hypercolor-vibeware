@@ -212,6 +212,7 @@ describe("phase 2 qualification", () => {
     expect(rejected?.qualification.gates.touches_forbidden_boundary).toBe(true);
     expect(rejected?.qualification.reject_reason).toBe("validation_failed");
     expect(isForbiddenPath("src/services/link/session.ts")).toBe(true);
+    expect(isForbiddenPath("SRC/Services/Link/Session.TS")).toBe(true);
     expect(pendingEmpty?.state).toBe("pending_qualify");
     expect(pendingSend?.state).toBe("pending_qualify");
     expect(pendingSend?.suspected_scope).toEqual([
@@ -337,6 +338,40 @@ describe("phase 2 qualification", () => {
       body: JSON.stringify({ qualified: true, actor: "owner", reason: "no" }),
     });
     expect(qualify.status).toBe(401);
+  });
+
+  it("includes evidence refs only for the problem surface", async () => {
+    const { app } = await setup();
+    const recentSendIds = (await seedSendFailedSpike(app)).filter((id) => id.startsWith("evt_send_recent_"));
+    const detect = await app.request("/v1/problems/detect", { method: "POST", headers: internalHeaders() });
+    expect(detect.status).toBe(200);
+    const detected = (await detect.json()) as { problems: Array<{ id: string; surface_id: string }> };
+    const pendingSend = detected.problems.find((problem) => problem.surface_id === "hc-thread-ui");
+    expect(pendingSend).toBeDefined();
+
+    const otherSurfaceId = await postEvent(app, {
+      event_id: "evt_send_other_surface",
+      event_type: "app.thread.send_settled",
+      surface_id: "hc-chats-ui",
+      occurred_at: occurred(1),
+      payload: { channel: "dm", outcome: "failed", kind: "text" },
+    });
+
+    const qualify = await app.request(`/v1/problems/${pendingSend?.id}/qualify`, {
+      method: "POST",
+      headers: { ...Object.fromEntries(internalHeaders()), "content-type": "application/json" },
+      body: JSON.stringify({ qualified: true, actor: "owner", reason: "surface-scoped refs" }),
+    });
+    expect(qualify.status).toBe(200);
+
+    const generated = await app.request(`/v1/problems/${pendingSend?.id}/generate`, {
+      method: "POST",
+      headers: internalHeaders(),
+    });
+    expect(generated.status).toBe(201);
+    const candidate = (await generated.json()) as { artifact: { evidence_refs: string[] } };
+    expect(candidate.artifact.evidence_refs).not.toContain(otherSurfaceId);
+    expect(candidate.artifact.evidence_refs.sort()).toEqual(recentSendIds.sort());
   });
 
   it("detects decline-heavy request decisions from the projection", async () => {

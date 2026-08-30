@@ -24,4 +24,13 @@ describe("loadConfig", () => {
       true,
     );
   });
+
+  it("fails boot when dashboard and internal tokens are identical", () => {
+    expect(() =>
+      loadConfig({
+        ...tokens,
+        VIBEWARE_DASHBOARD_TOKEN: tokens.VIBEWARE_INTERNAL_TOKEN,
+      }),
+    ).toThrow(/VIBEWARE_DASHBOARD_TOKEN and VIBEWARE_INTERNAL_TOKEN must be distinct/);
+  });
 });

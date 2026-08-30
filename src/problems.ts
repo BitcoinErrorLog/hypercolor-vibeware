@@ -221,7 +221,7 @@ export async function qualifyProblem(
     ...(qualification ?? {
       gates: {
         repeated: false,
-        multi_user: false,
+        min_volume: false,
         known_incident: false,
         measurement_changed: false,
         within_surface_scope: true,
@@ -265,17 +265,27 @@ export async function qualifyProblem(
   return { ok: true, problem: updated };
 }
 
-async function evidenceIdsFor(db: Database, qualification: Qualification | null): Promise<string[]> {
+async function evidenceIdsFor(
+  db: Database,
+  surfaceId: string,
+  qualification: Qualification | null,
+): Promise<string[]> {
   if (!qualification || qualification.evidence_types.length === 0) return [];
-  const typeClauses = qualification.evidence_types.map((_, index) => `type = $${index + 3}`);
+  const typeClauses = qualification.evidence_types.map((_, index) => `type = $${index + 4}`);
   const rows = await db.query<{ id: string }>(
     `SELECT id FROM evidence
      WHERE model_allowed = true
        AND occurred_at >= $1::timestamptz
        AND occurred_at < $2::timestamptz
+       AND surface_id = $3
        AND (${typeClauses.join(" OR ")})
      ORDER BY occurred_at, id`,
-    [qualification.evidence_window.start, qualification.evidence_window.end, ...qualification.evidence_types],
+    [
+      qualification.evidence_window.start,
+      qualification.evidence_window.end,
+      surfaceId,
+      ...qualification.evidence_types,
+    ],
   );
   return rows.map((row) => row.id);
 }
@@ -329,7 +339,7 @@ export async function generateCandidate(
   const qualification = problemQualification(problem);
   const artifact: CandidateArtifact = {
     surface: surface.id,
-    evidence_refs: await evidenceIdsFor(db, qualification),
+    evidence_refs: await evidenceIdsFor(db, problem.surface_id, qualification),
     allowed_paths: [...surface.writable_paths],
     forbidden_paths: unionForbiddenPaths(surface.forbidden_paths),
     budgets: pathBudgets(surface),

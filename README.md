@@ -8,12 +8,12 @@ Playbook §19 tables: `vibeware_surfaces`, `evidence`, `problems`, `candidates`,
 
 ## Run locally
 
-Node 22. Tokens must be at least 16 characters. There are no built-in defaults.
+Node 22. Tokens must be at least 16 characters and pairwise distinct. There are no built-in defaults. Boot throws if any two of ingest, dashboard, and internal are equal.
 
 ```bash
 docker compose up -d
 cp .env.example .env
-# set VIBEWARE_INGEST_TOKEN, VIBEWARE_DASHBOARD_TOKEN, and VIBEWARE_INTERNAL_TOKEN
+# set three pairwise-distinct tokens: VIBEWARE_INGEST_TOKEN, VIBEWARE_DASHBOARD_TOKEN, and VIBEWARE_INTERNAL_TOKEN
 npm install
 npm run dev
 ```
@@ -32,9 +32,9 @@ npm start
 | Variable | Required | Purpose |
 |---|---|---|
 | `DATABASE_URL` | yes in production | Postgres connection string |
-| `VIBEWARE_INGEST_TOKEN` | yes | Bearer token for `POST /v1/evidence` |
-| `VIBEWARE_DASHBOARD_TOKEN` | yes | Read-only bearer/cookie token for projection, dashboard, and `/login` |
-| `VIBEWARE_INTERNAL_TOKEN` | yes | Bearer token for detect, qualify, generate, and `POST /internal/gc` |
+| `VIBEWARE_INGEST_TOKEN` | yes | Bearer token for `POST /v1/evidence`. Must differ from the other two tokens |
+| `VIBEWARE_DASHBOARD_TOKEN` | yes | Read-only bearer/cookie token for projection, dashboard, and `/login`. Must differ from the other two tokens |
+| `VIBEWARE_INTERNAL_TOKEN` | yes | Bearer token for detect, qualify, generate, and `POST /internal/gc`. Must differ from the other two tokens |
 | `VIBEWARE_ALLOW_QUERY_TOKEN_LOGIN` | no | Set `true` to honor `?token=` on `GET /`. Default off. Never inferred from `Host` |
 | `VIBEWARE_INSECURE_COOKIE` | no | Set `true` for local http so the dashboard cookie is not `Secure`. Ignored when `NODE_ENV=production` or trusted `X-Forwarded-Proto=https` |
 | `VIBEWARE_TRUST_PROXY` | no | Set `true` to trust `X-Forwarded-Proto` (cookie `Secure`) and `X-Forwarded-For` (login rate limit). Default off |
@@ -47,8 +47,9 @@ npm start
 - `GET /` — HTML dashboard of those same counts. Authorize with `Authorization` or a login form that sets an httpOnly cookie. `?token=` works only when `VIBEWARE_ALLOW_QUERY_TOKEN_LOGIN=true`. HTML responses send `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'` and `X-Content-Type-Options: nosniff`. Interpolated values are also `escapeHtml`'d.
 - `POST /login` — sets the dashboard cookie. Failed attempts are rate-limited in memory (5 / 15 minutes per remote). The attempted token is not logged.
 - `POST /v1/problems/detect` — `Authorization: Bearer $VIBEWARE_INTERNAL_TOKEN`. Runs rule-based detectors on the hourly projection (never raw `evidence` rows), clusters hits into `problems`, writes `qualification` gates, and records `state_transitions`. Forbidden `suspected_scope` auto-rejects (`validation_failed`).
-- `POST /v1/problems/:id/qualify` — internal token. Human only. Body `{qualified, actor, reason}`. Sets `qualified` or `rejected`. Cannot qualify a forbidden-scope rejection.
-- `POST /v1/problems/:id/generate` — internal token. `403 unqualified` unless `problems.state === qualified`. If qualified, persists a `candidates` row in `request_ready` with a `candidate_request` artifact (`surface`, evidence IDs only, path lists, budgets). No LLM. No PR.
+- `POST /v1/problems/:id/qualify` — internal token. Human only. Body `{qualified, actor, reason}`. Sets `qualified` or `rejected`. Cannot qualify a forbidden-scope rejection. `actor` is an audit label, not authentication: v1 has one shared internal token; per-human credentials are later. Human qualify is a full override of non-forbidden gates (playbook: human qualifies). The forbidden-boundary gate remains non-overridable.
+- `POST /v1/problems/:id/generate` — internal token. `403 unqualified` unless `problems.state === qualified`. If qualified, persists a `candidates` row in `request_ready` with a `candidate_request` artifact (`surface`, evidence IDs only, path lists, budgets). No LLM. No PR. Generate still rechecks forbidden scope. Artifact `allowed_paths` always come from the surface manifest, not `suspected_scope`.
+- `qualification_score` on persisted `problems.qualification` is advisory only.
 - Dashboard `GET /` also lists problems (`id`, surface, state, title). No raw evidence.
 - `POST /internal/gc` — `Authorization: Bearer $VIBEWARE_INTERNAL_TOKEN`. Deletes evidence past 14-day retention. The process also runs this on a 15-minute timer.
 - `GET /health` — liveness.

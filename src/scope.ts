@@ -51,11 +51,7 @@ export const GLOBAL_FORBIDDEN_PATHS: readonly string[] = [
   "src/stores/inboxStore.ts",
 ];
 
-const FORBIDDEN_BASENAMES = new Set([
-  "session.ts",
-  "KeyStore.ts",
-  "vibeware.yaml",
-]);
+const FORBIDDEN_BASENAMES = new Set(["session.ts", "keystore.ts", "vibeware.yaml"]);
 
 export function normalizePath(path: string): string | null {
   const trimmed = path.trim().replaceAll("\\", "/");
@@ -68,28 +64,30 @@ export function normalizePath(path: string): string | null {
 export function pathMatchesRule(path: string, rule: string): boolean {
   const normalized = normalizePath(path);
   if (!normalized) return false;
-  const r = rule.replaceAll("\\", "/");
+  const folded = normalized.toLowerCase();
+  const r = rule.replaceAll("\\", "/").toLowerCase();
   if (r.endsWith("/**")) {
     const prefix = r.slice(0, -3);
-    return normalized === prefix || normalized.startsWith(`${prefix}/`);
+    return folded === prefix || folded.startsWith(`${prefix}/`);
   }
   if (r.endsWith("*") && !r.includes("**")) {
     const prefix = r.slice(0, -1);
     const slash = prefix.lastIndexOf("/");
     const dir = slash === -1 ? "" : prefix.slice(0, slash + 1);
     const filePrefix = slash === -1 ? prefix : prefix.slice(slash + 1);
-    if (dir && !normalized.startsWith(dir)) return false;
-    const name = normalized.slice(dir.length);
+    if (dir && !folded.startsWith(dir)) return false;
+    const name = folded.slice(dir.length);
     return name.startsWith(filePrefix) && !name.includes("/");
   }
-  return normalized === r;
+  return folded === r;
 }
 
 export function isForbiddenPath(path: string, surfaceForbidden: readonly string[] = []): boolean {
   const normalized = normalizePath(path);
   if (!normalized) return true;
-  const slash = normalized.lastIndexOf("/");
-  const basename = slash === -1 ? normalized : normalized.slice(slash + 1);
+  const folded = normalized.toLowerCase();
+  const slash = folded.lastIndexOf("/");
+  const basename = slash === -1 ? folded : folded.slice(slash + 1);
   if (FORBIDDEN_BASENAMES.has(basename)) return true;
   const rules = [...GLOBAL_FORBIDDEN_PATHS, ...surfaceForbidden];
   return rules.some((rule) => pathMatchesRule(normalized, rule));
