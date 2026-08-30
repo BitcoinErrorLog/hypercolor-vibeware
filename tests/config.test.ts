@@ -66,4 +66,17 @@ describe("loadConfig", () => {
     ).toThrow(/VIBEWARE_INGEST_ORIGINS/);
     expect(() => loadConfig({ ...tokens, VIBEWARE_INGEST_ORIGINS: "null" })).toThrow(/VIBEWARE_INGEST_ORIGINS/);
   });
+
+  it("rejects empty, whitespace-only, trailing-comma, and trailing-slash ingest origins", () => {
+    expect(() => loadConfig({ ...tokens, VIBEWARE_INGEST_ORIGINS: "" })).toThrow(/VIBEWARE_INGEST_ORIGINS/);
+    expect(() => loadConfig({ ...tokens, VIBEWARE_INGEST_ORIGINS: "https://a.example,  " })).toThrow(
+      /VIBEWARE_INGEST_ORIGINS/,
+    );
+    expect(() => loadConfig({ ...tokens, VIBEWARE_INGEST_ORIGINS: "https://a.example," })).toThrow(
+      /VIBEWARE_INGEST_ORIGINS/,
+    );
+    expect(() => loadConfig({ ...tokens, VIBEWARE_INGEST_ORIGINS: "https://a.example/" })).toThrow(
+      /VIBEWARE_INGEST_ORIGINS/,
+    );
+  });
 });

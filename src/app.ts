@@ -84,13 +84,13 @@ function dashboardAuthorized(
 
 function applyIngestCors(c: Context, config: Config): void {
   const origin = c.req.header("origin");
+  c.res.headers.set("Vary", "Origin");
   if (!origin || !config.ingestOrigins.includes(origin)) {
     return;
   }
   c.res.headers.set("Access-Control-Allow-Origin", origin);
   c.res.headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
   c.res.headers.set("Access-Control-Allow-Headers", "authorization, content-type");
-  c.res.headers.set("Vary", "Origin");
 }
 
 function attachDashboardCookie(c: Context, config: Config): void {

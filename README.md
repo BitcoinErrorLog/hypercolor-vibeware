@@ -43,7 +43,7 @@ npm start
 
 ## HTTP
 
-- `POST /v1/evidence` — ingest. `Authorization: Bearer $VIBEWARE_INGEST_TOKEN`. Unknown event types return `200 {accepted:false,reason:"unknown_event"}`. Extra keys, banned keys, values outside the closed payload enums, pubky-shaped values, and recovery-code-shaped values are dropped, not persisted. Route and error fields are closed enums only; free-text values (including `/`, whitespace, `?`, `#`, `=`, `@`) are rejected.
+- `POST /v1/evidence` — ingest. `Authorization: Bearer $VIBEWARE_INGEST_TOKEN`. Unknown event types return `200 {accepted:false,reason:"unknown_event"}`. Extra keys, banned keys, values outside the closed payload enums, pubky-shaped values, and recovery-code-shaped values are dropped, not persisted. Route and error fields are closed enums only; free-text values (including `/`, whitespace, `?`, `#`, `=`, `@`) are rejected. OPTIONS and POST always send `Vary: Origin`; `Access-Control-Allow-Origin` is set only for an exact allowlisted Origin.
 - `GET /v1/projection` — last 14 days of hourly counts by `event_type` + coarse payload class. `Authorization: Bearer $VIBEWARE_DASHBOARD_TOKEN`. This is the only agent-readable evidence API. `model_allowed = false` rows never appear.
 - `GET /` — HTML dashboard of those same counts. Authorize with `Authorization` or a login form that sets an httpOnly cookie. `?token=` works only when `VIBEWARE_ALLOW_QUERY_TOKEN_LOGIN=true`. HTML responses send `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'` and `X-Content-Type-Options: nosniff`. Interpolated values are also `escapeHtml`'d.
 - `POST /login` — sets the dashboard cookie. Failed attempts are rate-limited in memory (5 / 15 minutes per remote). The attempted token is not logged.

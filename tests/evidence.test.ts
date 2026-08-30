@@ -590,6 +590,7 @@ describe("evidence ingest and projection", () => {
     });
     expect([200, 204]).toContain(res.status);
     expectNoCors(res);
+    expect(res.headers.get("vary") ?? "").toMatch(/Origin/);
   });
 
   it("allowlisted Origin POST with a valid bearer returns 200 and ACAO", async () => {
@@ -618,10 +619,16 @@ describe("evidence ingest and projection", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ accepted: true, id: "evt_cors_unknown" });
     expectNoCors(res);
+    expect(res.headers.get("vary") ?? "").toMatch(/Origin/);
   });
 
-  it("does not send ACAO on dashboard or projection for an ingest Origin", async () => {
-    const { app } = await setup();
+  it("does not send ACAO on non-ingest routes for an ingest Origin", async () => {
+    const { app, db } = await setup();
+    await db.query(
+      `INSERT INTO problems (id, surface_id, title, summary, state)
+       VALUES ('prob_cors', 'hc-chats-ui', 'empty dms', 'empty state persists', 'detected')`,
+    );
+
     const dashboardHeadersWithOrigin = dashboardHeaders();
     dashboardHeadersWithOrigin.set("origin", TEST_INGEST_ORIGIN);
     const dashboard = await app.request("/", { headers: dashboardHeadersWithOrigin });
@@ -633,5 +640,49 @@ describe("evidence ingest and projection", () => {
     const projection = await app.request("/v1/projection", { headers: projectionHeadersWithOrigin });
     expect(projection.status).toBe(200);
     expectNoCors(projection);
+
+    const login = await app.request("/login", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: TEST_INGEST_ORIGIN,
+        host: "localhost:8080",
+      },
+      body: `token=${encodeURIComponent(TEST_DASHBOARD_TOKEN)}`,
+    });
+    expect([200, 302, 401, 403]).toContain(login.status);
+    expectNoCors(login);
+
+    const detectHeaders = internalHeaders();
+    detectHeaders.set("origin", TEST_INGEST_ORIGIN);
+    const detect = await app.request("/v1/problems/detect", { method: "POST", headers: detectHeaders });
+    expect([200, 401, 403]).toContain(detect.status);
+    expectNoCors(detect);
+
+    const qualifyHeaders = internalHeaders();
+    qualifyHeaders.set("origin", TEST_INGEST_ORIGIN);
+    qualifyHeaders.set("content-type", "application/json");
+    const qualify = await app.request("/v1/problems/prob_cors/qualify", {
+      method: "POST",
+      headers: qualifyHeaders,
+      body: JSON.stringify({ qualified: true, actor: "cors-test", reason: "audit" }),
+    });
+    expect([200, 401, 403]).toContain(qualify.status);
+    expectNoCors(qualify);
+
+    const generateHeaders = internalHeaders();
+    generateHeaders.set("origin", TEST_INGEST_ORIGIN);
+    const generate = await app.request("/v1/problems/prob_cors/generate", {
+      method: "POST",
+      headers: generateHeaders,
+    });
+    expect([200, 201, 401, 403]).toContain(generate.status);
+    expectNoCors(generate);
+
+    const gcHeaders = internalHeaders();
+    gcHeaders.set("origin", TEST_INGEST_ORIGIN);
+    const gc = await app.request("/internal/gc", { method: "POST", headers: gcHeaders });
+    expect([200, 401, 403]).toContain(gc.status);
+    expectNoCors(gc);
   });
 });
