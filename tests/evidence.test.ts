@@ -8,6 +8,7 @@ import {
   dashboardHeaders,
   ingestHeaders,
   internalHeaders,
+  socketEnv,
   TEST_COHORT_KEY,
   TEST_DASHBOARD_TOKEN,
   testConfig,
@@ -355,21 +356,30 @@ describe("evidence ingest and projection", () => {
   it("rate-limits failed dashboard logins without echoing the token", async () => {
     const { app } = await setup();
     const headers = { "content-type": "application/x-www-form-urlencoded" };
+    const env = socketEnv("198.51.100.10");
     for (let i = 0; i < 5; i += 1) {
-      const failed = await app.request("/login", {
-        method: "POST",
-        headers,
-        body: "token=wrong-guess-not-the-dashboard-token",
-      });
+      const failed = await app.request(
+        "/login",
+        {
+          method: "POST",
+          headers,
+          body: "token=wrong-guess-not-the-dashboard-token",
+        },
+        env,
+      );
       expect(failed.status).toBe(401);
       const text = await failed.text();
       expect(text).not.toContain("wrong-guess-not-the-dashboard-token");
     }
-    const limited = await app.request("/login", {
-      method: "POST",
-      headers,
-      body: `token=${encodeURIComponent(TEST_DASHBOARD_TOKEN)}`,
-    });
+    const limited = await app.request(
+      "/login",
+      {
+        method: "POST",
+        headers,
+        body: `token=${encodeURIComponent(TEST_DASHBOARD_TOKEN)}`,
+      },
+      env,
+    );
     expect(limited.status).toBe(429);
     const limitedText = await limited.text();
     expect(limitedText).toContain("Too many attempts.");
@@ -378,5 +388,112 @@ describe("evidence ingest and projection", () => {
       "default-src 'none'; style-src 'unsafe-inline'",
     );
     expect(limited.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
+  it("does not share a login bucket across distinct remotes", async () => {
+    const { app } = await setup();
+    const headers = { "content-type": "application/x-www-form-urlencoded" };
+    const attacker = socketEnv("198.51.100.20");
+    const other = socketEnv("198.51.100.21");
+    for (let i = 0; i < 5; i += 1) {
+      const failed = await app.request(
+        "/login",
+        { method: "POST", headers, body: "token=wrong-guess-not-the-dashboard-token" },
+        attacker,
+      );
+      expect(failed.status).toBe(401);
+    }
+    const locked = await app.request(
+      "/login",
+      { method: "POST", headers, body: `token=${encodeURIComponent(TEST_DASHBOARD_TOKEN)}` },
+      attacker,
+    );
+    expect(locked.status).toBe(429);
+
+    const otherFailed = await app.request(
+      "/login",
+      { method: "POST", headers, body: "token=wrong-guess-not-the-dashboard-token" },
+      other,
+    );
+    expect(otherFailed.status).toBe(401);
+
+    const otherOk = await app.request(
+      "/login",
+      { method: "POST", headers, body: `token=${encodeURIComponent(TEST_DASHBOARD_TOKEN)}` },
+      other,
+    );
+    expect(otherOk.status).toBe(302);
+  });
+
+  it("keys trusted-proxy logins on the rightmost X-Forwarded-For hop", async () => {
+    harness = await createTestApp({ ...testConfig, trustProxy: true });
+    const { app } = harness;
+    const form = { "content-type": "application/x-www-form-urlencoded" };
+    for (let i = 0; i < 5; i += 1) {
+      const failed = await app.request("/login", {
+        method: "POST",
+        headers: { ...form, "x-forwarded-for": "203.0.113.1, 192.0.2.10" },
+        body: "token=wrong-guess-not-the-dashboard-token",
+      });
+      expect(failed.status).toBe(401);
+    }
+    const rotatedClient = await app.request("/login", {
+      method: "POST",
+      headers: { ...form, "x-forwarded-for": "198.51.100.1, 192.0.2.10" },
+      body: `token=${encodeURIComponent(TEST_DASHBOARD_TOKEN)}`,
+    });
+    expect(rotatedClient.status).toBe(429);
+
+    const otherEdge = await app.request("/login", {
+      method: "POST",
+      headers: { ...form, "x-forwarded-for": "203.0.113.1, 192.0.2.99" },
+      body: "token=wrong-guess-not-the-dashboard-token",
+    });
+    expect(otherEdge.status).toBe(401);
+  });
+
+  it("returns duplicate instead of 500 for a repeated event_id", async () => {
+    const { app, db } = await setup();
+    const event = allowlistedEvent({ event_id: "evt_dup_1" });
+    const first = await app.request("/v1/evidence", {
+      method: "POST",
+      headers: ingestHeaders(),
+      body: JSON.stringify(event),
+    });
+    expect(first.status).toBe(200);
+    expect(await first.json()).toEqual({ accepted: true, id: "evt_dup_1" });
+
+    const second = await app.request("/v1/evidence", {
+      method: "POST",
+      headers: ingestHeaders(),
+      body: JSON.stringify(event),
+    });
+    expect(second.status).toBe(200);
+    expect(await second.json()).toEqual({ accepted: false, reason: "duplicate" });
+    expect(await dumpEvidence(db)).toHaveLength(1);
+  });
+
+  it("rejects oversized Content-Length without hanging on the body", async () => {
+    const { app } = await setup();
+    const headers = ingestHeaders();
+    headers.set("content-length", "9000");
+    const hang = new ReadableStream<Uint8Array>({
+      pull() {
+        // never enqueue — hang if the handler reads the body
+      },
+    });
+    const res = await Promise.race([
+      app.request("/v1/evidence", {
+        method: "POST",
+        headers,
+        body: hang,
+        duplex: "half",
+      } as RequestInit),
+      new Promise<Response>((_, reject) => {
+        setTimeout(() => reject(new Error("oversized ingest hung reading the body")), 1000);
+      }),
+    ]);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ accepted: false, reason: "payload_too_large" });
   });
 });

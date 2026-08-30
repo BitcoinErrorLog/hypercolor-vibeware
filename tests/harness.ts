@@ -58,6 +58,10 @@ export function internalHeaders(): Headers {
   return headers;
 }
 
+export function socketEnv(remoteAddress: string) {
+  return { incoming: { socket: { remoteAddress } } };
+}
+
 export function allowlistedEvent(overrides: Record<string, unknown> = {}) {
   return {
     event_type: "app.chat.empty_state",

@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { getConnInfo } from "@hono/node-server/conninfo";
 import { Hono, type Context } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
+import { MAX_BODY_BYTES, readTextLimited } from "./body.js";
 import type { Config } from "./config.js";
 import type { Database } from "./db.js";
 import { renderDashboardPage, renderLoginPage } from "./dashboard.js";
@@ -10,7 +12,6 @@ import { readProjection, serializeProjection } from "./projection.js";
 import { createFailureLimiter } from "./rateLimit.js";
 import { bearerMatches, tokensEqual } from "./tokens.js";
 
-const MAX_BODY_BYTES = 8192;
 const DASHBOARD_COOKIE = "vw_dashboard";
 const LOGIN_FAILURE_MAX = 5;
 const LOGIN_FAILURE_WINDOW_MS = 15 * 60 * 1000;
@@ -30,13 +31,38 @@ function cookieSecure(c: Context, config: Config): boolean {
   return true;
 }
 
+function rightmostForwardedFor(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const hops = raw.split(",");
+  for (let i = hops.length - 1; i >= 0; i -= 1) {
+    const hop = hops[i]?.trim();
+    if (hop) return hop;
+  }
+  return undefined;
+}
+
+function socketRemoteAddress(c: Context): string | undefined {
+  try {
+    const address = getConnInfo(c).remote.address;
+    if (typeof address === "string" && address.length > 0) return address;
+  } catch {
+    // app.request() without node bindings has no socket
+  }
+  return undefined;
+}
+
 function loginClientKey(c: Context, config: Config): string {
   if (config.trustProxy) {
-    const xff = c.req.header("x-forwarded-for");
-    const first = xff?.split(",")[0]?.trim();
-    if (first) return first;
+    const forwarded = rightmostForwardedFor(c.req.header("x-forwarded-for"));
+    if (forwarded) return forwarded;
   }
-  return "direct";
+  const remote = socketRemoteAddress(c);
+  if (remote) return remote;
+  return `unattributed:${randomUUID()}`;
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "23505";
 }
 
 function dashboardAuthorized(
@@ -80,13 +106,13 @@ export function createApp(db: Database, config: Config) {
     if (!bearerMatches(c.req.header("authorization"), config.ingestToken)) {
       return c.json({ accepted: false, reason: "unauthorized" }, 401);
     }
-    const raw = await c.req.text();
-    if (Buffer.byteLength(raw, "utf8") > MAX_BODY_BYTES) {
+    const limited = await readTextLimited(c.req.raw, MAX_BODY_BYTES);
+    if (!limited.ok) {
       return c.json({ accepted: false, reason: "payload_too_large" }, 200);
     }
     let body: unknown;
     try {
-      body = JSON.parse(raw) as unknown;
+      body = JSON.parse(limited.text) as unknown;
     } catch {
       return c.json({ accepted: false, reason: "invalid_json" }, 400);
     }
@@ -101,17 +127,29 @@ export function createApp(db: Database, config: Config) {
     if (surfaces.length === 0) {
       return c.json({ accepted: false, reason: "unknown_surface" }, 200);
     }
-    await db.query(
-      `INSERT INTO evidence (id, surface_id, type, payload, occurred_at, model_allowed, expires_at)
-       VALUES ($1, $2, $3, $4::jsonb, $5::timestamptz, true, $5::timestamptz + interval '14 days')`,
-      [
-        decision.row.id,
-        decision.row.surfaceId,
-        decision.row.type,
-        JSON.stringify(decision.row.payload),
-        decision.row.occurredAt.toISOString(),
-      ],
-    );
+    try {
+      const inserted = await db.query<{ id: string }>(
+        `INSERT INTO evidence (id, surface_id, type, payload, occurred_at, model_allowed, expires_at)
+         VALUES ($1, $2, $3, $4::jsonb, $5::timestamptz, true, $5::timestamptz + interval '14 days')
+         ON CONFLICT (id) DO NOTHING
+         RETURNING id`,
+        [
+          decision.row.id,
+          decision.row.surfaceId,
+          decision.row.type,
+          JSON.stringify(decision.row.payload),
+          decision.row.occurredAt.toISOString(),
+        ],
+      );
+      if (inserted.length === 0) {
+        return c.json({ accepted: false, reason: "duplicate" }, 200);
+      }
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        return c.json({ accepted: false, reason: "duplicate" }, 200);
+      }
+      throw error;
+    }
     return c.json({ accepted: true, id: decision.row.id }, 200);
   });
 
