@@ -193,8 +193,11 @@ export function createApp(db: Database, config: Config) {
     if (loginFailures.isLimited(key)) {
       return c.html(renderLoginPage("Too many attempts."), 429);
     }
-    const form = await c.req.parseBody();
-    const token = typeof form.token === "string" ? form.token : "";
+    const limited = await readTextLimited(c.req.raw, MAX_BODY_BYTES);
+    if (!limited.ok) {
+      return c.html(renderLoginPage("Payload too large."), 413);
+    }
+    const token = new URLSearchParams(limited.text).get("token") ?? "";
     if (!tokensEqual(token, config.dashboardToken)) {
       loginFailures.recordFailure(key);
       return c.html(renderLoginPage("Invalid token."), 401);

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { MAX_BODY_BYTES } from "../src/body.js";
 import { gcExpiredEvidence } from "../src/gc.js";
 import { readProjection, serializeProjection } from "../src/projection.js";
 import {
@@ -495,5 +496,55 @@ describe("evidence ingest and projection", () => {
     ]);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ accepted: false, reason: "payload_too_large" });
+  });
+
+  it("rejects oversized login bodies without reading past the ingest cap", async () => {
+    const { app } = await setup();
+    const hang = new ReadableStream<Uint8Array>({
+      pull() {
+        // never enqueue — hang if the handler reads the body
+      },
+    });
+    const declared = await Promise.race([
+      app.request("/login", {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          "content-length": String(MAX_BODY_BYTES + 1),
+        },
+        body: hang,
+        duplex: "half",
+      } as RequestInit),
+      new Promise<Response>((_, reject) => {
+        setTimeout(() => reject(new Error("oversized login hung reading the body")), 1000);
+      }),
+    ]);
+    expect(declared.status).toBe(413);
+    expect(declared.headers.get("set-cookie")).toBeNull();
+    const declaredHtml = await declared.text();
+    expect(declaredHtml).toContain("Payload too large.");
+    expect(declaredHtml).not.toContain(TEST_DASHBOARD_TOKEN);
+
+    const streamed = await Promise.race([
+      app.request("/login", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array(MAX_BODY_BYTES + 1));
+          },
+          pull() {
+            // further reads would hang
+          },
+        }),
+        duplex: "half",
+      } as RequestInit),
+      new Promise<Response>((_, reject) => {
+        setTimeout(() => reject(new Error("streamed login hung past the cap")), 1000);
+      }),
+    ]);
+    expect(streamed.status).toBe(413);
+    expect(streamed.headers.get("set-cookie")).toBeNull();
+    expect(await streamed.text()).toContain("Payload too large.");
   });
 });
