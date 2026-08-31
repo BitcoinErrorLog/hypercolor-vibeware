@@ -1,12 +1,23 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Database } from "./db.js";
+import { isCredentialUrl, secretShapeReason } from "./privacy.js";
 import { loadProblem, recordTransition } from "./problems.js";
-import { readProjection, serializeProjection, type SerializedProjectionRow } from "./projection.js";
+import { readProjectionView, serializeProjection, type SerializedProjectionRow } from "./projection.js";
 import { loadSurface, type SurfaceRecord } from "./surfaces.js";
 
 export const MAX_INITIAL_PERCENT = 10;
 export const V1_PERCENT_CAP = 25;
 export const ASSIGNMENT_BUCKETS = 100;
+
+export type PercentLimits = {
+  max_initial_percent: number;
+  requires_human_for_percent_over: number;
+};
+
+export const GLOBAL_PERCENT_LIMITS: PercentLimits = {
+  max_initial_percent: MAX_INITIAL_PERCENT,
+  requires_human_for_percent_over: V1_PERCENT_CAP,
+};
 
 const SHA256_HEX_RE = /^[0-9a-f]{40}$/;
 const COHORT_KEY_RE = /^[0-9a-f]{64}$/i;
@@ -116,7 +127,14 @@ function nonEmptyString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function stringHasBannedContent(value: string): boolean {
+  if (BANNED_KEY_RE.test(value)) return true;
+  if (secretShapeReason(value)) return true;
+  return isCredentialUrl(value);
+}
+
 export function jsonHasBannedKey(value: unknown): boolean {
+  if (typeof value === "string") return stringHasBannedContent(value);
   if (Array.isArray(value)) return value.some(jsonHasBannedKey);
   if (!isPlainObject(value)) return false;
   for (const [key, child] of Object.entries(value)) {
@@ -124,6 +142,20 @@ export function jsonHasBannedKey(value: unknown): boolean {
     if (jsonHasBannedKey(child)) return true;
   }
   return false;
+}
+
+export function enforcePercentLimits(
+  percent: number,
+  human: boolean,
+  limits: PercentLimits = GLOBAL_PERCENT_LIMITS,
+): { ok: true } | Fail {
+  const hardCap = Math.min(limits.requires_human_for_percent_over, V1_PERCENT_CAP);
+  const noHumanMax = Math.min(limits.max_initial_percent, MAX_INITIAL_PERCENT);
+  if (percent > hardCap) return { ok: false, reason: "percent_over_cap", status: 403 };
+  if (percent > noHumanMax && !human) {
+    return { ok: false, reason: "percent_requires_human", status: 403 };
+  }
+  return { ok: true };
 }
 
 export function parseHttpsOrigin(value: string): string | null {
@@ -184,7 +216,10 @@ export function publicExperiment(row: ExperimentRow): PublicExperiment {
   };
 }
 
-export function parseCreateExperimentBody(value: unknown): { ok: true; input: CreateExperimentInput } | Fail {
+export function parseCreateExperimentBody(
+  value: unknown,
+  limits: PercentLimits = GLOBAL_PERCENT_LIMITS,
+): { ok: true; input: CreateExperimentInput } | Fail {
   if (!isPlainObject(value)) return { ok: false, reason: "invalid_body", status: 400 };
   const candidateId = nonEmptyString(value.candidate_id);
   if (!candidateId || candidateId.length > 128) {
@@ -209,13 +244,8 @@ export function parseCreateExperimentBody(value: unknown): { ok: true; input: Cr
   const actor = nonEmptyString(value.actor);
   const reason = nonEmptyString(value.reason);
   const human = actor && reason ? { actor, reason } : undefined;
-
-  if (percent > V1_PERCENT_CAP) {
-    return { ok: false, reason: "percent_over_cap", status: 403 };
-  }
-  if (percent > MAX_INITIAL_PERCENT && !human) {
-    return { ok: false, reason: "percent_requires_human", status: 403 };
-  }
+  const gated = enforcePercentLimits(percent, Boolean(human), limits);
+  if (!gated.ok) return gated;
 
   return {
     ok: true,
@@ -260,11 +290,24 @@ export async function createExperiment(
     return { ok: false, reason: "candidate_not_ready", status: 403 };
   }
 
+  const problem = await loadProblem(db, candidate.problem_id);
+  if (!problem) return { ok: false, reason: "not_found", status: 404 };
+  const surface = await loadSurface(db, problem.surface_id);
+  if (!surface) return { ok: false, reason: "not_found", status: 404 };
+
+  const human = Boolean(input.actor && input.reason);
+  const gated = enforcePercentLimits(input.percent, human, {
+    max_initial_percent: surface.max_initial_percent,
+    requires_human_for_percent_over: surface.requires_human_for_percent_over,
+  });
+  if (!gated.ok) return gated;
+
+  const noHumanMax = Math.min(surface.max_initial_percent, MAX_INITIAL_PERCENT);
   const config: ExperimentConfig = {
     percent: input.percent,
     candidate_build: { sha: input.candidateSha, origin: input.candidateOrigin },
   };
-  if (input.percent > MAX_INITIAL_PERCENT && input.actor && input.reason) {
+  if (input.percent > noHumanMax && input.actor && input.reason) {
     config.human = { actor: input.actor, reason: input.reason };
   }
 
@@ -475,7 +518,21 @@ export async function evaluateExperiment(
   const surface = await loadSurface(db, problem.surface_id);
   if (!surface) return { ok: false, reason: "not_found", status: 404 };
 
-  const rows = serializeProjection(await readProjection(db, now));
+  const startedMs =
+    experiment.started_at == null
+      ? null
+      : experiment.started_at instanceof Date
+        ? experiment.started_at.getTime()
+        : new Date(experiment.started_at).getTime();
+  if (startedMs == null || Number.isNaN(startedMs)) {
+    return { ok: false, reason: "minimum_exposure_hours", status: 403 };
+  }
+  const requiredMs = surface.minimum_exposure_hours * HOUR_MS;
+  if (now.getTime() - startedMs < requiredMs) {
+    return { ok: false, reason: "minimum_exposure_hours", status: 403 };
+  }
+
+  const rows = serializeProjection(await readProjectionView(db));
   const config = experimentConfig(experiment);
   const killed = experiment.killed || experiment.state === "killed";
   const decision_input = buildDecisionInput({

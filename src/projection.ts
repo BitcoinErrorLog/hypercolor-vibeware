@@ -8,14 +8,16 @@ export type ProjectionRow = {
   event_count: string | number | bigint;
 };
 
+export async function readProjectionView(db: Database): Promise<ProjectionRow[]> {
+  return db.query<ProjectionRow>(
+    `SELECT hour, event_type, payload_class, event_count
+     FROM vibeware_evidence_projection
+     ORDER BY hour DESC, event_type, payload_class`,
+  );
+}
+
 export async function readProjection(db: Database, now?: Date): Promise<ProjectionRow[]> {
-  if (!now) {
-    return db.query<ProjectionRow>(
-      `SELECT hour, event_type, payload_class, event_count
-       FROM vibeware_evidence_projection
-       ORDER BY hour DESC, event_type, payload_class`,
-    );
-  }
+  if (!now) return readProjectionView(db);
   return db.query<ProjectionRow>(
     `SELECT
         date_trunc('hour', occurred_at) AS hour,

@@ -210,7 +210,7 @@ export function createApp(db: Database, config: Config, options: AppOptions = {}
     if (!bearerMatches(c.req.header("authorization"), config.dashboardToken)) {
       return c.json({ accepted: false, reason: "unauthorized" }, 401);
     }
-    const rows = serializeProjection(await readProjection(db, clock()));
+    const rows = serializeProjection(await readProjection(db));
     return c.json({ window_days: 14, rows });
   });
 

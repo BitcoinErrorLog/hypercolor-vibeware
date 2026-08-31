@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   assignmentUnit,
   buildDecisionInput,
+  enforcePercentLimits,
   jsonHasBannedKey,
   parseCandidateSha,
+  parseCreateExperimentBody,
   parseHttpsOrigin,
 } from "../src/experiments.js";
 import { parseSurface } from "../src/surfaces.js";
@@ -28,9 +30,13 @@ afterEach(async () => {
 });
 
 const NOW = new Date("2026-08-31T10:00:00.000Z");
+const HOUR_MS = 60 * 60 * 1000;
 const VALID_SHA = "a".repeat(40);
 const VALID_ORIGIN = "https://hypercolor-web.vercel.app";
 const CANDIDATE_ID = "cand_ready";
+const PUBKY_SHAPED = "y".repeat(52);
+const RECOVERY_SHAPED = "A".repeat(43);
+const CREDENTIAL_URL = "https://user:pass@homeserver.example";
 
 function hexKey(n: number): string {
   return n.toString(16).padStart(64, "0");
@@ -50,8 +56,30 @@ function jsonHeaders(): Headers {
   return headers;
 }
 
-async function setup() {
-  harness = await createTestApp(testConfig, { now: () => NOW });
+async function patchSurface(
+  db: Harness["db"],
+  id: string,
+  patch: {
+    exposure?: { max_initial_percent?: number; requires_human_for_percent_over?: number };
+    selection?: { minimum_exposure_hours?: number };
+  },
+) {
+  const rows = await db.query<{ manifest: unknown }>(`SELECT manifest FROM vibeware_surfaces WHERE id = $1`, [id]);
+  const manifest =
+    typeof rows[0]?.manifest === "string"
+      ? JSON.parse(rows[0].manifest)
+      : { ...(rows[0]?.manifest as Record<string, unknown>) };
+  if (patch.exposure) {
+    manifest.exposure = { ...(manifest.exposure as Record<string, unknown> | undefined), ...patch.exposure };
+  }
+  if (patch.selection) {
+    manifest.selection = { ...(manifest.selection as Record<string, unknown> | undefined), ...patch.selection };
+  }
+  await db.query(`UPDATE vibeware_surfaces SET manifest = $1::jsonb WHERE id = $2`, [JSON.stringify(manifest), id]);
+}
+
+async function setup(now: () => Date = () => NOW) {
+  harness = await createTestApp(testConfig, { now });
   await harness.db.query(
     `INSERT INTO problems (id, surface_id, title, summary, state)
      VALUES ($1, $2, $3, $4, $5)`,
@@ -174,6 +202,92 @@ describe("percent gates", () => {
     expect(allowed.status).toBe(201);
     expect(await allowed.json()).toMatchObject({ percent: 25, killed: false });
   });
+
+  it("honors a tighter per-surface max_initial_percent", async () => {
+    const { app, db } = await setup();
+    await patchSurface(db, "hc-thread-ui", { exposure: { max_initial_percent: 5 } });
+
+    const implicit = await createExperiment(app);
+    expect(implicit.status).toBe(403);
+    expect(await implicit.json()).toEqual({ reason: "percent_requires_human" });
+
+    const explicit = await createExperiment(app, { percent: 10 });
+    expect(explicit.status).toBe(403);
+    expect(await explicit.json()).toEqual({ reason: "percent_requires_human" });
+
+    const within = await createExperiment(app, { percent: 5 });
+    expect(within.status).toBe(201);
+    expect(await within.json()).toMatchObject({ percent: 5, killed: false });
+
+    const withHuman = await createExperiment(app, {
+      percent: 10,
+      actor: "owner",
+      reason: "tight surface still allows human up to the v1 cap",
+    });
+    expect(withHuman.status).toBe(201);
+    expect(await withHuman.json()).toMatchObject({ percent: 10, killed: false });
+  });
+
+  it("honors a tighter per-surface requires_human_for_percent_over", async () => {
+    const { app, db } = await setup();
+    await patchSurface(db, "hc-thread-ui", { exposure: { requires_human_for_percent_over: 15 } });
+
+    const overSurfaceCap = await createExperiment(app, {
+      percent: 16,
+      actor: "owner",
+      reason: "above this surface cap",
+    });
+    expect(overSurfaceCap.status).toBe(403);
+    expect(await overSurfaceCap.json()).toEqual({ reason: "percent_over_cap" });
+
+    const atSurfaceCap = await createExperiment(app, {
+      percent: 15,
+      actor: "owner",
+      reason: "surface hard cap",
+    });
+    expect(atSurfaceCap.status).toBe(201);
+    expect(await atSurfaceCap.json()).toMatchObject({ percent: 15 });
+  });
+
+  it("cannot raise the global v1 cap through a looser surface", async () => {
+    const { app, db } = await setup();
+    await patchSurface(db, "hc-thread-ui", {
+      exposure: { max_initial_percent: 20, requires_human_for_percent_over: 40 },
+    });
+
+    const noHuman = await createExperiment(app, { percent: 11 });
+    expect(noHuman.status).toBe(403);
+    expect(await noHuman.json()).toEqual({ reason: "percent_requires_human" });
+
+    const overGlobal = await createExperiment(app, {
+      percent: 26,
+      actor: "owner",
+      reason: "surface cannot raise v1",
+    });
+    expect(overGlobal.status).toBe(403);
+    expect(await overGlobal.json()).toEqual({ reason: "percent_over_cap" });
+  });
+
+  it("parseCreateExperimentBody applies supplied surface limits", () => {
+    const body = {
+      candidate_id: CANDIDATE_ID,
+      candidate_sha: VALID_SHA,
+      candidate_origin: VALID_ORIGIN,
+      percent: 10,
+    };
+    expect(parseCreateExperimentBody(body).ok).toBe(true);
+    expect(parseCreateExperimentBody(body, { max_initial_percent: 5, requires_human_for_percent_over: 25 })).toEqual({
+      ok: false,
+      reason: "percent_requires_human",
+      status: 403,
+    });
+    expect(
+      enforcePercentLimits(10, false, { max_initial_percent: 5, requires_human_for_percent_over: 25 }),
+    ).toEqual({ ok: false, reason: "percent_requires_human", status: 403 });
+    expect(
+      enforcePercentLimits(16, true, { max_initial_percent: 10, requires_human_for_percent_over: 15 }),
+    ).toEqual({ ok: false, reason: "percent_over_cap", status: 403 });
+  });
 });
 
 describe("assignment", () => {
@@ -285,12 +399,25 @@ describe("assignment", () => {
   });
 });
 
+describe("banned decision values", () => {
+  it("rejects banned keys and ingest-shaped values", () => {
+    expect(jsonHasBannedKey({ token: "x" })).toBe(true);
+    expect(jsonHasBannedKey({ note: PUBKY_SHAPED })).toBe(true);
+    expect(jsonHasBannedKey({ note: RECOVERY_SHAPED })).toBe(true);
+    expect(jsonHasBannedKey({ note: CREDENTIAL_URL })).toBe(true);
+    expect(jsonHasBannedKey({ note: "https://homeserver.example/callback" })).toBe(true);
+    expect(jsonHasBannedKey({ surface_id: "hc-thread-ui", primary_metric: "send_settle_success" })).toBe(false);
+  });
+});
+
 describe("evaluator", () => {
   it("reads projection counts only and ignores candidate metric overrides", async () => {
-    const { app, db } = await setup();
+    let current = NOW;
+    const { app, db } = await setup(() => current);
     const created = await createExperiment(app);
     const experiment = (await created.json()) as { id: string };
 
+    current = new Date(NOW.getTime() + 48 * HOUR_MS);
     const evaluated = await app.request(`/v1/experiments/${experiment.id}/evaluate`, {
       method: "POST",
       headers: internalHeaders(),
@@ -331,6 +458,99 @@ describe("evaluator", () => {
     expect(fromProjection.counts.events_total).toBe(0);
     expect(fromProjection.primary_metric).toBe("send_settle_success");
     expect(jsonHasBannedKey(fromProjection)).toBe(false);
+  });
+
+  it("rejects evaluate before minimum_exposure_hours", async () => {
+    let current = NOW;
+    const { app } = await setup(() => current);
+    const created = await createExperiment(app);
+    const experiment = (await created.json()) as { id: string };
+
+    const tooEarly = await app.request(`/v1/experiments/${experiment.id}/evaluate`, {
+      method: "POST",
+      headers: internalHeaders(),
+    });
+    expect(tooEarly.status).toBe(403);
+    expect(await tooEarly.json()).toEqual({ reason: "minimum_exposure_hours" });
+
+    current = new Date(NOW.getTime() + 47 * HOUR_MS);
+    const stillEarly = await app.request(`/v1/experiments/${experiment.id}/evaluate`, {
+      method: "POST",
+      headers: internalHeaders(),
+    });
+    expect(stillEarly.status).toBe(403);
+    expect(await stillEarly.json()).toEqual({ reason: "minimum_exposure_hours" });
+
+    current = new Date(NOW.getTime() + 48 * HOUR_MS);
+    const ready = await app.request(`/v1/experiments/${experiment.id}/evaluate`, {
+      method: "POST",
+      headers: internalHeaders(),
+    });
+    expect(ready.status).toBe(201);
+  });
+
+  it("reads minimum_exposure_hours from the surface manifest", async () => {
+    let current = NOW;
+    const { app, db } = await setup(() => current);
+    await patchSurface(db, "hc-thread-ui", { selection: { minimum_exposure_hours: 72 } });
+    const created = await createExperiment(app);
+    const experiment = (await created.json()) as { id: string };
+
+    current = new Date(NOW.getTime() + 48 * HOUR_MS);
+    const atDefault = await app.request(`/v1/experiments/${experiment.id}/evaluate`, {
+      method: "POST",
+      headers: internalHeaders(),
+    });
+    expect(atDefault.status).toBe(403);
+    expect(await atDefault.json()).toEqual({ reason: "minimum_exposure_hours" });
+
+    current = new Date(NOW.getTime() + 72 * HOUR_MS);
+    const atSurface = await app.request(`/v1/experiments/${experiment.id}/evaluate`, {
+      method: "POST",
+      headers: internalHeaders(),
+    });
+    expect(atSurface.status).toBe(201);
+  });
+
+  it("evaluate reads the projection view, not a clocked evidence aggregate", async () => {
+    const past = new Date("2020-01-01T00:00:00.000Z");
+    let current = past;
+    const { app, db } = await setup(() => current);
+    await db.query(
+      `INSERT INTO evidence (id, surface_id, type, payload, occurred_at, model_allowed, expires_at)
+       VALUES
+         (
+           'old_clocked',
+           'hc-thread-ui',
+           'app.error.coarse',
+           '{"code":"network","surface":"thread"}'::jsonb,
+           '2020-01-01T00:00:00.000Z'::timestamptz,
+           true,
+           '2020-01-15T00:00:00.000Z'::timestamptz
+         ),
+         (
+           'live_view',
+           'hc-thread-ui',
+           'app.error.coarse',
+           '{"code":"auth","surface":"thread"}'::jsonb,
+           now(),
+           true,
+           now() + interval '14 days'
+         )`,
+    );
+    const created = await createExperiment(app);
+    const experiment = (await created.json()) as { id: string };
+    current = new Date(past.getTime() + 48 * HOUR_MS);
+    const evaluated = await app.request(`/v1/experiments/${experiment.id}/evaluate`, {
+      method: "POST",
+      headers: internalHeaders(),
+    });
+    expect(evaluated.status).toBe(201);
+    const body = (await evaluated.json()) as {
+      decision_input: { counts: { events_total: number; app_error_coarse: number } };
+    };
+    expect(body.decision_input.counts.events_total).toBe(1);
+    expect(body.decision_input.counts.app_error_coarse).toBe(1);
   });
 });
 

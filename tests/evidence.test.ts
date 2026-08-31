@@ -684,5 +684,59 @@ describe("evidence ingest and projection", () => {
     const gc = await app.request("/internal/gc", { method: "POST", headers: gcHeaders });
     expect([200, 401, 403]).toContain(gc.status);
     expectNoCors(gc);
+
+    await db.query(
+      `INSERT INTO candidates (id, problem_id, state, base_sha, artifact)
+       VALUES ('cand_cors', 'prob_cors', 'request_ready', 'unresolved', '{}'::jsonb)`,
+    );
+    const createHeaders = internalHeaders();
+    createHeaders.set("origin", TEST_INGEST_ORIGIN);
+    createHeaders.set("content-type", "application/json");
+    const created = await app.request("/v1/experiments", {
+      method: "POST",
+      headers: createHeaders,
+      body: JSON.stringify({
+        candidate_id: "cand_cors",
+        candidate_sha: "a".repeat(40),
+        candidate_origin: TEST_INGEST_ORIGIN,
+      }),
+    });
+    expect([200, 201, 401, 403]).toContain(created.status);
+    expectNoCors(created);
+    const createdBody = (await created.json()) as { id?: string };
+    const experimentId = createdBody.id ?? "exp_missing";
+
+    const getHeaders = dashboardHeaders();
+    getHeaders.set("origin", TEST_INGEST_ORIGIN);
+    const status = await app.request(`/v1/experiments/${experimentId}`, { headers: getHeaders });
+    expect([200, 401, 403, 404]).toContain(status.status);
+    expectNoCors(status);
+
+    const assignHeaders = internalHeaders();
+    assignHeaders.set("origin", TEST_INGEST_ORIGIN);
+    const assignment = await app.request(
+      `/v1/experiments/${experimentId}/assignment?cohort_key=${TEST_COHORT_KEY}`,
+      { headers: assignHeaders },
+    );
+    expect([200, 401, 403, 404]).toContain(assignment.status);
+    expectNoCors(assignment);
+
+    const evaluateHeaders = internalHeaders();
+    evaluateHeaders.set("origin", TEST_INGEST_ORIGIN);
+    const evaluate = await app.request(`/v1/experiments/${experimentId}/evaluate`, {
+      method: "POST",
+      headers: evaluateHeaders,
+    });
+    expect([200, 201, 401, 403, 404]).toContain(evaluate.status);
+    expectNoCors(evaluate);
+
+    const killHeaders = internalHeaders();
+    killHeaders.set("origin", TEST_INGEST_ORIGIN);
+    const kill = await app.request(`/v1/experiments/${experimentId}/kill`, {
+      method: "POST",
+      headers: killHeaders,
+    });
+    expect([200, 401, 403, 404]).toContain(kill.status);
+    expectNoCors(kill);
   });
 });

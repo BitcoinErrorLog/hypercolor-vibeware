@@ -173,6 +173,19 @@ export function secretShapeReason(value: string): "pubky_shaped" | "recovery_sha
   return null;
 }
 
+export function isCredentialUrl(value: string): boolean {
+  const trimmed = value.trim();
+  if (/^[a-z][a-z0-9+.-]*:\/\/[^\s]*@/i.test(trimmed)) return true;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.username !== "" || parsed.password !== "") return true;
+    const protocol = parsed.protocol.toLowerCase();
+    return protocol === "http:" || protocol === "https:" || protocol === "pubky:";
+  } catch {
+    return false;
+  }
+}
+
 function extractCohortKey(body: Record<string, unknown>): string | null {
   if (typeof body.cohort_key === "string") return body.cohort_key;
   if (isPlainObject(body.actor) && typeof body.actor.cohort_key === "string") {

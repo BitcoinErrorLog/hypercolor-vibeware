@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EVENT_TYPES, evaluateEvidence, PAYLOAD_ENUMS, PAYLOAD_FIELDS } from "../src/privacy.js";
+import { EVENT_TYPES, evaluateEvidence, isCredentialUrl, PAYLOAD_ENUMS, PAYLOAD_FIELDS } from "../src/privacy.js";
 import { allowlistedEvent, TEST_COHORT_KEY } from "./harness.js";
 
 const id = () => "evt_test";
@@ -60,6 +60,12 @@ describe("evaluateEvidence", () => {
       id,
     );
     expect(decision).toEqual({ accepted: false, reason: "invalid_payload" });
+  });
+
+  it("rejects credential URLs the same way ingest drops URL-shaped values", () => {
+    expect(isCredentialUrl("https://user:pass@homeserver.example")).toBe(true);
+    expect(isCredentialUrl("https://homeserver.example/callback")).toBe(true);
+    expect(isCredentialUrl("hc-thread-ui")).toBe(false);
   });
 
   it("PAYLOAD_ENUMS is exhaustive for every PAYLOAD_FIELDS key", () => {
