@@ -23,3 +23,15 @@ export function bearerMatches(header: string | undefined, expected: string): boo
   if (token === null) return false;
   return tokensEqual(token, expected);
 }
+
+export function bearerMatchesAny(header: string | undefined, expected: readonly string[]): boolean {
+  const token = readBearer(header);
+  if (token === null) return false;
+  let matched = false;
+  for (const value of expected) {
+    if (tokensEqual(token, value)) {
+      matched = true;
+    }
+  }
+  return matched;
+}

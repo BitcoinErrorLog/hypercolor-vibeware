@@ -15,8 +15,26 @@ import {
   dashboardHeaders,
   ingestHeaders,
   internalHeaders,
+  TEST_COHORT_KEY,
+  TEST_DASHBOARD_TOKEN,
+  TEST_INGEST_ORIGIN,
   testConfig,
 } from "./harness.js";
+
+const UNKNOWN_ORIGIN = "https://evil.example";
+
+function expectNoCors(res: Response) {
+  expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  expect(res.headers.get("access-control-allow-credentials")).toBeNull();
+}
+
+function expectAssignmentCors(res: Response, origin: string) {
+  expect(res.headers.get("access-control-allow-origin")).toBe(origin);
+  expect(res.headers.get("access-control-allow-methods")).toBe("GET, OPTIONS");
+  expect(res.headers.get("access-control-allow-headers")).toBe("authorization, content-type");
+  expect(res.headers.get("vary")).toBe("Origin");
+  expect(res.headers.get("access-control-allow-credentials")).toBeNull();
+}
 
 type Harness = Awaited<ReturnType<typeof createTestApp>>;
 
@@ -555,7 +573,7 @@ describe("evaluator", () => {
 });
 
 describe("auth", () => {
-  it("uses internal for mutate and assignment; dashboard may read status", async () => {
+  it("uses ingest or internal for assignment; mutate stays internal; dashboard may read status", async () => {
     const { app } = await setup();
     const ingestCreate = await createExperiment(app, {}, ingestHeaders());
     expect(ingestCreate.status).toBe(401);
@@ -566,11 +584,40 @@ describe("auth", () => {
     const created = await createExperiment(app);
     const experiment = (await created.json()) as { id: string };
 
+    const ingestAssign = await app.request(
+      `/v1/experiments/${experiment.id}/assignment?cohort_key=${hexKey(1)}`,
+      { headers: ingestHeaders() },
+    );
+    expect(ingestAssign.status).toBe(200);
+    expect(await ingestAssign.json()).toEqual({
+      bucket: assignmentUnit(experiment.id, hexKey(1)) < 10 ? "candidate" : "control",
+      experiment_id: experiment.id,
+      killed: false,
+    });
+
     const dashboardAssign = await app.request(
       `/v1/experiments/${experiment.id}/assignment?cohort_key=${hexKey(1)}`,
       { headers: dashboardHeaders() },
     );
     expect(dashboardAssign.status).toBe(401);
+
+    const cookieAssign = await app.request(
+      `/v1/experiments/${experiment.id}/assignment?cohort_key=${hexKey(1)}`,
+      { headers: { cookie: `vw_dashboard=${TEST_DASHBOARD_TOKEN}` } },
+    );
+    expect(cookieAssign.status).toBe(401);
+
+    const ingestKill = await app.request(`/v1/experiments/${experiment.id}/kill`, {
+      method: "POST",
+      headers: ingestHeaders(),
+    });
+    expect(ingestKill.status).toBe(401);
+
+    const ingestEvaluate = await app.request(`/v1/experiments/${experiment.id}/evaluate`, {
+      method: "POST",
+      headers: ingestHeaders(),
+    });
+    expect(ingestEvaluate.status).toBe(401);
 
     const dashboardKill = await app.request(`/v1/experiments/${experiment.id}/kill`, {
       method: "POST",
@@ -598,5 +645,114 @@ describe("auth", () => {
       headers: internalHeaders(),
     });
     expect(internalStatus.status).toBe(200);
+  });
+
+  it("serves assignment CORS only for an allowlisted Origin", async () => {
+    const { app } = await setup();
+    const created = await createExperiment(app);
+    const experiment = (await created.json()) as { id: string };
+    const path = `/v1/experiments/${experiment.id}/assignment?cohort_key=${TEST_COHORT_KEY}`;
+
+    const allowlisted = ingestHeaders();
+    allowlisted.set("origin", TEST_INGEST_ORIGIN);
+    const ok = await app.request(path, { headers: allowlisted });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({
+      bucket: assignmentUnit(experiment.id, TEST_COHORT_KEY) < 10 ? "candidate" : "control",
+      experiment_id: experiment.id,
+      killed: false,
+    });
+    expectAssignmentCors(ok, TEST_INGEST_ORIGIN);
+
+    const preflight = await app.request(`/v1/experiments/${experiment.id}/assignment`, {
+      method: "OPTIONS",
+      headers: {
+        origin: TEST_INGEST_ORIGIN,
+        "access-control-request-method": "GET",
+        "access-control-request-headers": "authorization",
+      },
+    });
+    expect(preflight.status).toBe(204);
+    expectAssignmentCors(preflight, TEST_INGEST_ORIGIN);
+
+    const unknown = ingestHeaders();
+    unknown.set("origin", UNKNOWN_ORIGIN);
+    const noAcao = await app.request(path, { headers: unknown });
+    expect(noAcao.status).toBe(200);
+    expectNoCors(noAcao);
+    expect(noAcao.headers.get("vary") ?? "").toMatch(/Origin/);
+
+    const unknownPreflight = await app.request(`/v1/experiments/${experiment.id}/assignment`, {
+      method: "OPTIONS",
+      headers: {
+        origin: UNKNOWN_ORIGIN,
+        "access-control-request-method": "GET",
+        "access-control-request-headers": "authorization",
+      },
+    });
+    expect([200, 204]).toContain(unknownPreflight.status);
+    expectNoCors(unknownPreflight);
+    expect(unknownPreflight.headers.get("vary") ?? "").toMatch(/Origin/);
+
+    const dashboard = dashboardHeaders();
+    dashboard.set("origin", TEST_INGEST_ORIGIN);
+    const rejected = await app.request(path, { headers: dashboard });
+    expect(rejected.status).toBe(401);
+    expect(await rejected.json()).toEqual({ reason: "unauthorized" });
+
+    const missingKey = ingestHeaders();
+    missingKey.set("origin", TEST_INGEST_ORIGIN);
+    const badKey = await app.request(`/v1/experiments/${experiment.id}/assignment`, {
+      headers: missingKey,
+    });
+    expect(badKey.status).toBe(400);
+    expect(await badKey.json()).toEqual({ reason: "invalid_cohort_key" });
+  });
+
+  it("forces control after kill when assignment is read with the ingest token", async () => {
+    const { app } = await setup();
+    const created = await createExperiment(app);
+    const experiment = (await created.json()) as { id: string };
+    const candidateKey = firstKey(experiment.id, (unit) => unit < 10);
+
+    const beforeHeaders = ingestHeaders();
+    beforeHeaders.set("origin", TEST_INGEST_ORIGIN);
+    const before = await app.request(
+      `/v1/experiments/${experiment.id}/assignment?cohort_key=${candidateKey}`,
+      { headers: beforeHeaders },
+    );
+    expect(before.status).toBe(200);
+    expect(await before.json()).toEqual({
+      bucket: "candidate",
+      experiment_id: experiment.id,
+      killed: false,
+    });
+    expectAssignmentCors(before, TEST_INGEST_ORIGIN);
+
+    const kill = await app.request(`/v1/experiments/${experiment.id}/kill`, {
+      method: "POST",
+      headers: ingestHeaders(),
+    });
+    expect(kill.status).toBe(401);
+
+    const killed = await app.request(`/v1/experiments/${experiment.id}/kill`, {
+      method: "POST",
+      headers: internalHeaders(),
+    });
+    expect(killed.status).toBe(200);
+
+    const afterHeaders = ingestHeaders();
+    afterHeaders.set("origin", TEST_INGEST_ORIGIN);
+    const after = await app.request(
+      `/v1/experiments/${experiment.id}/assignment?cohort_key=${candidateKey}`,
+      { headers: afterHeaders },
+    );
+    expect(after.status).toBe(200);
+    expect(await after.json()).toEqual({
+      bucket: "control",
+      experiment_id: experiment.id,
+      killed: true,
+    });
+    expectAssignmentCors(after, TEST_INGEST_ORIGIN);
   });
 });

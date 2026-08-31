@@ -23,9 +23,9 @@ function expectNoCors(res: Response) {
   expect(res.headers.get("access-control-allow-credentials")).toBeNull();
 }
 
-function expectIngestCors(res: Response, origin: string) {
+function expectIngestCors(res: Response, origin: string, methods = "POST, OPTIONS") {
   expect(res.headers.get("access-control-allow-origin")).toBe(origin);
-  expect(res.headers.get("access-control-allow-methods")).toBe("POST, OPTIONS");
+  expect(res.headers.get("access-control-allow-methods")).toBe(methods);
   expect(res.headers.get("access-control-allow-headers")).toBe("authorization, content-type");
   expect(res.headers.get("vary")).toBe("Origin");
   expect(res.headers.get("access-control-allow-credentials")).toBeNull();
@@ -656,7 +656,7 @@ describe("evidence ingest and projection", () => {
     expect(res.headers.get("vary") ?? "").toMatch(/Origin/);
   });
 
-  it("does not send ACAO on non-ingest routes for an ingest Origin", async () => {
+  it("does not send ACAO on dashboard, projection, or mutate routes for an ingest Origin", async () => {
     const { app, db } = await setup();
     await db.query(
       `INSERT INTO problems (id, surface_id, title, summary, state)
@@ -746,14 +746,14 @@ describe("evidence ingest and projection", () => {
     expect([200, 401, 403, 404]).toContain(status.status);
     expectNoCors(status);
 
-    const assignHeaders = internalHeaders();
+    const assignHeaders = ingestHeaders();
     assignHeaders.set("origin", TEST_INGEST_ORIGIN);
     const assignment = await app.request(
       `/v1/experiments/${experimentId}/assignment?cohort_key=${TEST_COHORT_KEY}`,
       { headers: assignHeaders },
     );
-    expect([200, 401, 403, 404]).toContain(assignment.status);
-    expectNoCors(assignment);
+    expect(assignment.status).toBe(200);
+    expectIngestCors(assignment, TEST_INGEST_ORIGIN, "GET, OPTIONS");
 
     const evaluateHeaders = internalHeaders();
     evaluateHeaders.set("origin", TEST_INGEST_ORIGIN);

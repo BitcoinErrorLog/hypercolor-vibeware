@@ -22,7 +22,7 @@ import { detectProblems, generateCandidate, listProblems, publicProblem, qualify
 import { evaluateEvidence } from "./privacy.js";
 import { readProjectionView, serializeProjection } from "./projection.js";
 import { createFailureLimiter } from "./rateLimit.js";
-import { bearerMatches, tokensEqual } from "./tokens.js";
+import { bearerMatches, bearerMatchesAny, tokensEqual } from "./tokens.js";
 
 export type AppOptions = {
   now?: () => Date;
@@ -92,14 +92,14 @@ function dashboardAuthorized(
   return false;
 }
 
-function applyIngestCors(c: Context, config: Config): void {
+function applyIngestCors(c: Context, config: Config, methods = "POST, OPTIONS"): void {
   const origin = c.req.header("origin");
   c.res.headers.set("Vary", "Origin");
   if (!origin || !config.ingestOrigins.includes(origin)) {
     return;
   }
   c.res.headers.set("Access-Control-Allow-Origin", origin);
-  c.res.headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+  c.res.headers.set("Access-Control-Allow-Methods", methods);
   c.res.headers.set("Access-Control-Allow-Headers", "authorization, content-type");
 }
 
@@ -290,8 +290,20 @@ export function createApp(db: Database, config: Config, options: AppOptions = {}
     return c.json(publicExperiment(result.experiment), 201);
   });
 
+  app.use("/v1/experiments/:id/assignment", async (c, next) => {
+    if (c.req.method === "OPTIONS") {
+      const response = c.body(null, 204);
+      applyIngestCors(c, config, "GET, OPTIONS");
+      return response;
+    }
+    await next();
+    if (c.req.method === "GET") {
+      applyIngestCors(c, config, "GET, OPTIONS");
+    }
+  });
+
   app.get("/v1/experiments/:id/assignment", async (c) => {
-    if (!bearerMatches(c.req.header("authorization"), config.internalToken)) {
+    if (!bearerMatchesAny(c.req.header("authorization"), [config.ingestToken, config.internalToken])) {
       return c.json({ reason: "unauthorized" }, 401);
     }
     const cohortKey = parseCohortKey(c.req.query("cohort_key"));
