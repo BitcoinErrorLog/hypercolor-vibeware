@@ -25,8 +25,8 @@ afterEach(async () => {
 
 const NOW = new Date("2026-08-30T22:00:00.000Z");
 
-async function setup() {
-  harness = await createTestApp(testConfig, { now: () => NOW });
+async function setup(now: () => Date = () => NOW) {
+  harness = await createTestApp(testConfig, { now });
   return harness;
 }
 
@@ -372,6 +372,66 @@ describe("phase 2 qualification", () => {
     const candidate = (await generated.json()) as { artifact: { evidence_refs: string[] } };
     expect(candidate.artifact.evidence_refs).not.toContain(otherSurfaceId);
     expect(candidate.artifact.evidence_refs.sort()).toEqual(recentSendIds.sort());
+  });
+
+  it("detect reads the projection view, not a clocked evidence aggregate", async () => {
+    const past = new Date("2020-01-01T22:00:00.000Z");
+    const { app, db } = await setup(() => past);
+    for (let hour = 1; hour <= 6; hour += 1) {
+      for (let n = 0; n < 2; n += 1) {
+        await db.query(
+          `INSERT INTO evidence (id, surface_id, type, payload, occurred_at, model_allowed, expires_at)
+           VALUES (
+             $1,
+             'hc-chats-ui',
+             'app.chat.empty_state',
+             '{"kind":"dms"}'::jsonb,
+             timestamptz '2020-01-01T22:00:00.000Z' - ($2::int * interval '1 hour'),
+             true,
+             timestamptz '2020-01-15T00:00:00.000Z'
+           )`,
+          [`old_clocked_${hour}_${n}`, hour],
+        );
+      }
+    }
+    const clockedOnly = await app.request("/v1/problems/detect", {
+      method: "POST",
+      headers: internalHeaders(),
+    });
+    expect(clockedOnly.status).toBe(200);
+    expect(await clockedOnly.json()).toEqual({ problems: [] });
+
+    for (let hour = 1; hour <= 6; hour += 1) {
+      for (let n = 0; n < 2; n += 1) {
+        await db.query(
+          `INSERT INTO evidence (id, surface_id, type, payload, occurred_at, model_allowed, expires_at)
+           VALUES (
+             $1,
+             'hc-chats-ui',
+             'app.chat.empty_state',
+             '{"kind":"dms"}'::jsonb,
+             now() - ($2::int * interval '1 hour'),
+             true,
+             now() + interval '14 days'
+           )`,
+          [`live_view_${hour}_${n}`, hour],
+        );
+      }
+    }
+    const fromView = await app.request("/v1/problems/detect", {
+      method: "POST",
+      headers: internalHeaders(),
+    });
+    expect(fromView.status).toBe(200);
+    const body = (await fromView.json()) as {
+      problems: Array<{ detector_key: string; surface_id: string }>;
+    };
+    expect(body.problems).toEqual([
+      expect.objectContaining({
+        detector_key: "app.chat.empty_state.unescaped",
+        surface_id: "hc-chats-ui",
+      }),
+    ]);
   });
 
   it("detects decline-heavy request decisions from the projection", async () => {

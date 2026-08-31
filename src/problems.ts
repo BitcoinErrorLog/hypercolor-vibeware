@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Database } from "./db.js";
 import { prepareProblems, runDetectors, type DetectorHit } from "./detectors.js";
 import { isForbiddenRejection, type Qualification } from "./qualify.js";
-import { readProjection, serializeProjection } from "./projection.js";
+import { readProjectionView, serializeProjection } from "./projection.js";
 import { scopeTouchesForbidden, unionForbiddenPaths } from "./scope.js";
 import { loadSurface, loadSurfaces, type SurfaceRecord } from "./surfaces.js";
 
@@ -187,7 +187,7 @@ export async function detectProblems(
   extraHits: readonly DetectorHit[] = [],
 ): Promise<ProblemRow[]> {
   const surfaces = await loadSurfaces(db);
-  const rows = serializeProjection(await readProjection(db, now));
+  const rows = serializeProjection(await readProjectionView(db));
   const hits = runDetectors(rows, surfaces, now, extraHits);
   const prepared = prepareProblems(hits, surfaces);
   const problems: ProblemRow[] = [];

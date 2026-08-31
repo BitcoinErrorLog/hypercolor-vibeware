@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { MAX_BODY_BYTES } from "../src/body.js";
 import { gcExpiredEvidence } from "../src/gc.js";
-import { readProjection, serializeProjection } from "../src/projection.js";
+import { readProjectionView, serializeProjection } from "../src/projection.js";
 import {
   allowlistedEvent,
   closeTestApp,
@@ -42,8 +42,8 @@ afterEach(async () => {
   }
 });
 
-async function setup() {
-  harness = await createTestApp();
+async function setup(now?: () => Date) {
+  harness = await createTestApp(testConfig, now ? { now } : {});
   return harness;
 }
 
@@ -161,7 +161,7 @@ describe("evidence ingest and projection", () => {
          now() + interval '14 days'
        )`,
     );
-    const rows = serializeProjection(await readProjection(db));
+    const rows = serializeProjection(await readProjectionView(db));
     expect(rows).toEqual([]);
     const projection = await app.request("/v1/projection", { headers: dashboardHeaders() });
     const body = (await projection.json()) as { rows: Array<{ payload_class: string }> };
@@ -258,6 +258,40 @@ describe("evidence ingest and projection", () => {
       "default-src 'none'; style-src 'unsafe-inline'",
     );
     expect(page.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
+  it("dashboard GET / reads the projection view, not a clocked evidence aggregate", async () => {
+    const past = new Date("2020-01-01T00:00:00.000Z");
+    const { app, db } = await setup(() => past);
+    await db.query(
+      `INSERT INTO evidence (id, surface_id, type, payload, occurred_at, model_allowed, expires_at)
+       VALUES
+         (
+           'old_clocked',
+           'hc-thread-ui',
+           'app.error.coarse',
+           '{"code":"network","surface":"thread"}'::jsonb,
+           '2020-01-01T00:00:00.000Z'::timestamptz,
+           true,
+           '2020-01-15T00:00:00.000Z'::timestamptz
+         ),
+         (
+           'live_view',
+           'hc-thread-ui',
+           'app.error.coarse',
+           '{"code":"auth","surface":"thread"}'::jsonb,
+           now(),
+           true,
+           now() + interval '14 days'
+         )`,
+    );
+    const page = await app.request("/", { headers: dashboardHeaders() });
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain("auth|thread");
+    expect(html).not.toContain("network|thread");
+    expect(html).not.toContain("2020-01-01");
+    expect(html).toContain("<td>app.error.coarse</td><td>1</td>");
   });
 
   it("rejects hostile free-text route values and does not persist them", async () => {

@@ -20,7 +20,7 @@ import {
 } from "./experiments.js";
 import { detectProblems, generateCandidate, listProblems, publicProblem, qualifyProblem } from "./problems.js";
 import { evaluateEvidence } from "./privacy.js";
-import { readProjection, serializeProjection } from "./projection.js";
+import { readProjectionView, serializeProjection } from "./projection.js";
 import { createFailureLimiter } from "./rateLimit.js";
 import { bearerMatches, tokensEqual } from "./tokens.js";
 
@@ -210,7 +210,7 @@ export function createApp(db: Database, config: Config, options: AppOptions = {}
     if (!bearerMatches(c.req.header("authorization"), config.dashboardToken)) {
       return c.json({ accepted: false, reason: "unauthorized" }, 401);
     }
-    const rows = serializeProjection(await readProjection(db));
+    const rows = serializeProjection(await readProjectionView(db));
     return c.json({ window_days: 14, rows });
   });
 
@@ -383,8 +383,7 @@ export function createApp(db: Database, config: Config, options: AppOptions = {}
     if (!dashboardAuthorized(c.req.header("authorization"), getCookie(c, DASHBOARD_COOKIE), config.dashboardToken)) {
       return c.html(renderLoginPage(), 200);
     }
-    const now = clock();
-    const rows = await readProjection(db, now);
+    const rows = await readProjectionView(db);
     const problems = await listProblems(db);
     return c.html(renderDashboardPage(rows, problems), 200);
   });
