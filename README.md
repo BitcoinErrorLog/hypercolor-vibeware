@@ -34,7 +34,7 @@ npm start
 | `DATABASE_URL` | yes in production | Postgres connection string |
 | `VIBEWARE_INGEST_TOKEN` | yes | Bearer token for `POST /v1/evidence`. Must differ from the other two tokens |
 | `VIBEWARE_DASHBOARD_TOKEN` | yes | Read-only bearer/cookie token for projection, dashboard, and `/login`. Must differ from the other two tokens |
-| `VIBEWARE_INTERNAL_TOKEN` | yes | Bearer token for detect, qualify, generate, and `POST /internal/gc`. Must differ from the other two tokens |
+| `VIBEWARE_INTERNAL_TOKEN` | yes | Bearer token for detect, qualify, generate, experiments (create, assign, kill, evaluate), and `POST /internal/gc`. Must differ from the other two tokens |
 | `VIBEWARE_ALLOW_QUERY_TOKEN_LOGIN` | no | Set `true` to honor `?token=` on `GET /`. Default off. Never inferred from `Host` |
 | `VIBEWARE_INSECURE_COOKIE` | no | Set `true` for local http so the dashboard cookie is not `Secure`. Ignored when `NODE_ENV=production` or trusted `X-Forwarded-Proto=https` |
 | `VIBEWARE_TRUST_PROXY` | no | Set `true` to trust `X-Forwarded-Proto` (cookie `Secure`) and `X-Forwarded-For` (login rate limit). Default off |
@@ -50,6 +50,11 @@ npm start
 - `POST /v1/problems/detect` — `Authorization: Bearer $VIBEWARE_INTERNAL_TOKEN`. Runs rule-based detectors on the hourly projection (never raw `evidence` rows), clusters hits into `problems`, writes `qualification` gates, and records `state_transitions`. Forbidden `suspected_scope` auto-rejects (`validation_failed`).
 - `POST /v1/problems/:id/qualify` — internal token. Human only. Body `{qualified, actor, reason}`. Sets `qualified` or `rejected`. Cannot qualify a forbidden-scope rejection. `actor` is an audit label, not authentication: v1 has one shared internal token; per-human credentials are later. Human qualify is a full override of non-forbidden gates (playbook: human qualifies). The forbidden-boundary gate remains non-overridable.
 - `POST /v1/problems/:id/generate` — internal token. `403 unqualified` unless `problems.state === qualified`. If qualified, persists a `candidates` row in `request_ready` with a `candidate_request` artifact (`surface`, evidence IDs only, path lists, budgets). No LLM. No PR. Generate still rechecks forbidden scope. Artifact `allowed_paths` always come from the surface manifest, not `suspected_scope`.
+- `POST /v1/experiments` — internal token. Body `{candidate_id, candidate_sha, candidate_origin, percent?, actor?, reason?}`. Registers an immutable `candidate_build` (`sha` = 40 hex, `origin` = exact https origin; store only, never fetch). `403 candidate_not_ready` if the candidate is missing or not `request_ready`. Rejects `latest` / branch refs. Default `percent` is 10. Percent 11–25 requires human `{actor, reason}`. Percent above 25 is `403 percent_over_cap` in v1 even with a human (`requires_human_for_percent_over: 25`; v1 does not raise the cap). Kill state is not taken from the request or from `candidate_build`.
+- `GET /v1/experiments/:id` — dashboard or internal token. Experiment status (`state`, `killed`, `percent`, `candidate_build`). No assignment.
+- `GET /v1/experiments/:id/assignment?cohort_key=` — internal token. Stable hash of `experiment_id + cohort_key` into 100 buckets; `candidate` if `unit < percent`, else `control`. After kill, every cohort is `control`. `cohort_key` is 64 hex and is not stored.
+- `POST /v1/experiments/:id/kill` — internal token. Sets `experiments.killed` and `state=killed` on this control plane. One request returns all later assignments to control. The kill switch is not a candidate field and cannot be overridden by `candidate_build`.
+- `POST /v1/experiments/:id/evaluate` — internal token. Separate evaluator. Reads the 14-day hourly projection only (never raw `evidence`). Writes `evaluations.result.decision_input` with counts and rates. Primary metric comes from the surface manifest (`empty_state_escape_rate`, `send_settle_success`, `onboarding_completion_rate`), not from a candidate. Guardrails: `app.error.coarse` rate and whether `send_settled=failed` increased vs the prior window. No LLM. No banned keys.
 - `qualification_score` on persisted `problems.qualification` is advisory only.
 - Dashboard `GET /` also lists problems (`id`, surface, state, title). No raw evidence.
 - `POST /internal/gc` — `Authorization: Bearer $VIBEWARE_INTERNAL_TOKEN`. Deletes evidence past 14-day retention. The process also runs this on a 15-minute timer.
@@ -67,4 +72,4 @@ Do not put tokens in this repository.
 
 ## Privacy gate
 
-Persisted rows are allowlisted coarse events only, with `model_allowed=true`. Every payload field is a closed enum (`PAYLOAD_ENUMS` is exhaustive for `PAYLOAD_FIELDS`). Raw evidence expires after 14 days and is deleted. The SQL view `vibeware_evidence_projection` is the only read path used by the dashboard and the projection API.
+Persisted rows are allowlisted coarse events only, with `model_allowed=true`. Every payload field is a closed enum (`PAYLOAD_ENUMS` is exhaustive for `PAYLOAD_FIELDS`). Raw evidence expires after 14 days and is deleted. The SQL view `vibeware_evidence_projection` is the only read path used by the dashboard, the projection API, detectors, and the experiment evaluator.

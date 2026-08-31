@@ -8,6 +8,8 @@ export type SurfaceRecord = {
   max_initial_percent: number;
   requires_human_for_percent_over: number;
   minimum_exposure_hours: number;
+  primary_metric: string;
+  guardrails: string[];
 };
 
 type ManifestScope = {
@@ -22,6 +24,8 @@ type ManifestExposure = {
 
 type ManifestSelection = {
   minimum_exposure_hours?: unknown;
+  primary_metric?: unknown;
+  guardrails?: unknown;
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -56,6 +60,8 @@ export function parseSurface(row: { id: string; owner: string; manifest: unknown
     max_initial_percent: asPositiveInt(exposure.max_initial_percent, 10),
     requires_human_for_percent_over: asPositiveInt(exposure.requires_human_for_percent_over, 25),
     minimum_exposure_hours: asPositiveInt(selection.minimum_exposure_hours, 48),
+    primary_metric: typeof selection.primary_metric === "string" ? selection.primary_metric : "",
+    guardrails: asStringList(selection.guardrails),
   };
 }
 

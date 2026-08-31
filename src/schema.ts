@@ -58,6 +58,7 @@ export const SCHEMA_STATEMENTS: readonly string[] = [
   started_at timestamptz,
   ended_at timestamptz
 )`,
+  `ALTER TABLE experiments ADD COLUMN IF NOT EXISTS killed boolean not null default false`,
   `CREATE TABLE IF NOT EXISTS evaluations (
   id text primary key,
   experiment_id text not null,

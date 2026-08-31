@@ -8,6 +8,16 @@ import type { Database } from "./db.js";
 import { renderDashboardPage, renderLoginPage } from "./dashboard.js";
 import type { DetectorHit } from "./detectors.js";
 import { gcExpiredEvidence } from "./gc.js";
+import {
+  assignExperiment,
+  createExperiment,
+  evaluateExperiment,
+  killExperiment,
+  loadExperiment,
+  parseCohortKey,
+  parseCreateExperimentBody,
+  publicExperiment,
+} from "./experiments.js";
 import { detectProblems, generateCandidate, listProblems, publicProblem, qualifyProblem } from "./problems.js";
 import { evaluateEvidence } from "./privacy.js";
 import { readProjection, serializeProjection } from "./projection.js";
@@ -253,6 +263,82 @@ export function createApp(db: Database, config: Config, options: AppOptions = {}
       return c.json({ reason: result.reason }, result.status);
     }
     return c.json(result.candidate, result.created ? 201 : 200);
+  });
+
+  app.post("/v1/experiments", async (c) => {
+    if (!bearerMatches(c.req.header("authorization"), config.internalToken)) {
+      return c.json({ reason: "unauthorized" }, 401);
+    }
+    const limited = await readTextLimited(c.req.raw, MAX_BODY_BYTES);
+    if (!limited.ok) {
+      return c.json({ reason: "payload_too_large" }, 400);
+    }
+    let body: unknown;
+    try {
+      body = JSON.parse(limited.text) as unknown;
+    } catch {
+      return c.json({ reason: "invalid_json" }, 400);
+    }
+    const parsed = parseCreateExperimentBody(body);
+    if (!parsed.ok) {
+      return c.json({ reason: parsed.reason }, parsed.status);
+    }
+    const result = await createExperiment(db, parsed.input, clock());
+    if (!result.ok) {
+      return c.json({ reason: result.reason }, result.status);
+    }
+    return c.json(publicExperiment(result.experiment), 201);
+  });
+
+  app.get("/v1/experiments/:id/assignment", async (c) => {
+    if (!bearerMatches(c.req.header("authorization"), config.internalToken)) {
+      return c.json({ reason: "unauthorized" }, 401);
+    }
+    const cohortKey = parseCohortKey(c.req.query("cohort_key"));
+    if (!cohortKey) {
+      return c.json({ reason: "invalid_cohort_key" }, 400);
+    }
+    const result = await assignExperiment(db, c.req.param("id"), cohortKey);
+    if (!result.ok) {
+      return c.json({ reason: result.reason }, result.status);
+    }
+    return c.json(result.assignment, 200);
+  });
+
+  app.post("/v1/experiments/:id/kill", async (c) => {
+    if (!bearerMatches(c.req.header("authorization"), config.internalToken)) {
+      return c.json({ reason: "unauthorized" }, 401);
+    }
+    const result = await killExperiment(db, c.req.param("id"), clock());
+    if (!result.ok) {
+      return c.json({ reason: result.reason }, result.status);
+    }
+    return c.json(publicExperiment(result.experiment), 200);
+  });
+
+  app.post("/v1/experiments/:id/evaluate", async (c) => {
+    if (!bearerMatches(c.req.header("authorization"), config.internalToken)) {
+      return c.json({ reason: "unauthorized" }, 401);
+    }
+    const result = await evaluateExperiment(db, c.req.param("id"), clock());
+    if (!result.ok) {
+      return c.json({ reason: result.reason }, result.status);
+    }
+    return c.json({ id: result.evaluationId, experiment_id: result.decision_input.experiment_id, decision_input: result.decision_input }, 201);
+  });
+
+  app.get("/v1/experiments/:id", async (c) => {
+    const header = c.req.header("authorization");
+    const dashboardOk = dashboardAuthorized(header, getCookie(c, DASHBOARD_COOKIE), config.dashboardToken);
+    const internalOk = bearerMatches(header, config.internalToken);
+    if (!dashboardOk && !internalOk) {
+      return c.json({ reason: "unauthorized" }, 401);
+    }
+    const experiment = await loadExperiment(db, c.req.param("id"));
+    if (!experiment) {
+      return c.json({ reason: "not_found" }, 404);
+    }
+    return c.json(publicExperiment(experiment), 200);
   });
 
   app.post("/internal/gc", async (c) => {
