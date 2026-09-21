@@ -1,6 +1,7 @@
 {
   "name": "hypercolor-vibeware",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "Hypercolor Vibeware evidence store, projection, and internal dashboard. Not the Hypercolor app.",
   "type": "module",
